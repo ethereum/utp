@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 
+[dev-dependencies]
+quickcheck = "1.0.3"
