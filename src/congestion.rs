@@ -170,6 +170,7 @@ impl Controller {
 
         // Mark the packet acknowledged. To acknowledge a previously acknowledged packet is an
         // error.
+        // TODO: Handle multiple acknowledgements.
         if packet.acked {
             return Err(Error::DuplicateAck);
         }
