@@ -6,11 +6,11 @@ const UTP_PACKET_HEADER_LEN: usize = 20;
 /// Size of a Selective ACK segment in bits.
 const SELECTIVE_ACK_BITS: usize = 32;
 
-/// Size of an extension identifier in bits.
-const EXTENSION_BITS: usize = 8;
+/// Size of an extension identifier in bytes.
+const EXTENSION_TYPE_LEN: usize = 1;
 
-/// Size of an extension length specifier in bits.
-const EXTENSION_LEN_BITS: usize = 8;
+/// Size of an extension length specifier in bytes.
+const EXTENSION_LEN_LEN: usize = 1;
 
 #[derive(Copy, Clone, Debug)]
 pub struct InvalidUtpPacketType;
@@ -485,7 +485,7 @@ impl UtpPacket {
     pub fn len(&self) -> usize {
         let mut len = UTP_PACKET_HEADER_LEN;
         if let Some(ref sack) = self.selective_ack {
-            len += sack.len() + ((EXTENSION_BITS + EXTENSION_LEN_BITS) / 8);
+            len += sack.len() + EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN;
         }
         len += self.payload.len();
 
