@@ -485,7 +485,7 @@ impl UtpPacket {
     pub fn len(&self) -> usize {
         let mut len = UTP_PACKET_HEADER_LEN;
         if let Some(ref sack) = self.selective_ack {
-            len += sack.len() * ((EXTENSION_BITS + EXTENSION_LEN_BITS) / 8);
+            len += sack.len() + ((EXTENSION_BITS + EXTENSION_LEN_BITS) / 8);
         }
         len += self.payload.len();
 
@@ -672,9 +672,12 @@ mod tests {
     #[test]
     fn selective_ack_encode_decode() {
         fn prop(selective_ack: SelectiveAck) -> TestResult {
+            let len = selective_ack.len();
+
             let encoded = selective_ack.encode();
 
             assert!(encoded.len() % (SELECTIVE_ACK_BITS / 8) == 0);
+            assert_eq!(encoded.len(), len);
 
             let decoded = SelectiveAck::decode(&encoded).expect("failed to decode Selective ACK");
 
@@ -714,7 +717,12 @@ mod tests {
                 payload,
             };
 
+            let len = packet.len();
+
             let encoded = packet.encode();
+
+            assert_eq!(encoded.len(), len);
+
             let decoded = UtpPacket::decode(&encoded).expect("failed to decode uTP packet");
 
             TestResult::from_bool(decoded == packet)
