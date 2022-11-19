@@ -229,7 +229,7 @@ impl Controller {
             if rtt_var_adjustment.is_negative() {
                 self.rtt_variance_micros = self
                     .rtt_variance_micros
-                    .saturating_sub(rtt_var_adjustment.abs() as u64);
+                    .saturating_sub(rtt_var_adjustment.unsigned_abs());
             } else {
                 self.rtt_variance_micros = self
                     .rtt_variance_micros
@@ -241,7 +241,7 @@ impl Controller {
             if rtt_adjustment.is_negative() {
                 self.rtt = self
                     .rtt
-                    .saturating_sub(Duration::from_micros(rtt_adjustment.abs() as u64));
+                    .saturating_sub(Duration::from_micros(rtt_adjustment.unsigned_abs()));
             } else {
                 self.rtt = self
                     .rtt
@@ -380,7 +380,7 @@ fn compute_rtt_variance_adjustment(
     (((abs_delta_micros as f64) - (rtt_variance_micros as f64)) / 4.0) as i64
 }
 
-#[derive(Clone, Debug, Eq, PartialOrd)]
+#[derive(Clone, Debug, Eq)]
 struct Delay {
     value: Duration,
     deadline: Instant,
@@ -389,6 +389,12 @@ struct Delay {
 impl PartialEq for Delay {
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
+    }
+}
+
+impl PartialOrd for Delay {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

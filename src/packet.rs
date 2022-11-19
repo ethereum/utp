@@ -226,8 +226,8 @@ impl UtpPacketHeader {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![];
 
-        let packet_type = Into::<u8>::into(self.packet_type.clone()).to_be_bytes()[0];
-        let version = Into::<u8>::into(self.version.clone()).to_be_bytes()[0];
+        let packet_type = Into::<u8>::into(self.packet_type).to_be_bytes()[0];
+        let version = Into::<u8>::into(self.version).to_be_bytes()[0];
         let type_version = (packet_type << 4) | version;
         bytes.push(type_version);
 
@@ -323,7 +323,7 @@ impl SelectiveAck {
             acked.push(fragment);
         }
 
-        if remainder.len() > 0 {
+        if !remainder.is_empty() {
             let mut fragment: [bool; SELECTIVE_ACK_BITS] = [false; SELECTIVE_ACK_BITS];
             fragment[..remainder.len()].copy_from_slice(remainder);
             acked.push(fragment);
@@ -332,8 +332,8 @@ impl SelectiveAck {
         Self { acked }
     }
 
-    /// Returns the size of the Selective ACK in bytes.
-    pub fn len(&self) -> usize {
+    /// Returns the length in bytes of the encoded Selective ACK.
+    pub fn encoded_len(&self) -> usize {
         (self.acked.len() * SELECTIVE_ACK_BITS) / 8
     }
 
@@ -412,39 +412,6 @@ pub struct UtpPacket {
 }
 
 impl UtpPacket {
-    pub fn new(
-        packet_type: UtpPacketType,
-        conn_id: u16,
-        ts_microseconds: u32,
-        ts_diff_microseconds: u32,
-        window_size: u32,
-        seq_num: u16,
-        ack_num: u16,
-        selective_ack: Option<SelectiveAck>,
-        payload: Vec<u8>,
-    ) -> Self {
-        let extension = match selective_ack {
-            Some(..) => Extension::SelectiveAck,
-            None => Extension::None,
-        };
-
-        Self {
-            header: UtpPacketHeader {
-                packet_type,
-                version: UtpVersion::One,
-                extension,
-                conn_id,
-                ts_microseconds,
-                ts_diff_microseconds,
-                window_size,
-                seq_num,
-                ack_num,
-            },
-            selective_ack,
-            payload,
-        }
-    }
-
     pub fn packet_type(&self) -> UtpPacketType {
         self.header.packet_type
     }
@@ -482,10 +449,10 @@ impl UtpPacket {
     }
 
     /// Returns the length in bytes of the encoded packet.
-    pub fn len(&self) -> usize {
+    pub fn encoded_len(&self) -> usize {
         let mut len = UTP_PACKET_HEADER_LEN;
         if let Some(ref sack) = self.selective_ack {
-            len += sack.len() + EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN;
+            len += sack.encoded_len() + EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN;
         }
         len += self.payload.len();
 
@@ -515,9 +482,7 @@ impl UtpPacket {
         }
 
         let mut header: [u8; UTP_PACKET_HEADER_LEN] = [0; UTP_PACKET_HEADER_LEN];
-        for i in 0..UTP_PACKET_HEADER_LEN {
-            header[i] = value[i];
-        }
+        header.copy_from_slice(&value[..UTP_PACKET_HEADER_LEN]);
         let header = UtpPacketHeader::decode(&header)?;
 
         let (extensions, extensions_len) =
@@ -529,7 +494,7 @@ impl UtpPacket {
             .iter()
             .find(|(ext, _)| *ext == Extension::SelectiveAck);
         let selective_ack = match selective_ack {
-            Some((_, data)) => Some(SelectiveAck::decode(&data)?),
+            Some((_, data)) => Some(SelectiveAck::decode(data)?),
             None => None,
         };
 
@@ -555,6 +520,8 @@ impl UtpPacket {
         })
     }
 
+    // TODO: Resolve disabled clippy lint.
+    #[allow(clippy::type_complexity)]
     fn decode_raw_extensions(
         first_ext: Extension,
         data: &[u8],
@@ -579,7 +546,7 @@ impl UtpPacket {
             }
 
             let ext_data = data[ext_start..ext_start + ext_len].to_vec();
-            extensions.push((Extension::from(ext), ext_data));
+            extensions.push((ext, ext_data));
 
             ext = Extension::from(next_ext);
             index = ext_start + ext_len;
@@ -672,12 +639,12 @@ mod tests {
     #[test]
     fn selective_ack_encode_decode() {
         fn prop(selective_ack: SelectiveAck) -> TestResult {
-            let len = selective_ack.len();
+            let encoded_len = selective_ack.encoded_len();
 
             let encoded = selective_ack.encode();
 
             assert!(encoded.len() % (SELECTIVE_ACK_BITS / 8) == 0);
-            assert_eq!(encoded.len(), len);
+            assert_eq!(encoded.len(), encoded_len);
 
             let decoded = SelectiveAck::decode(&encoded).expect("failed to decode Selective ACK");
 
@@ -717,11 +684,11 @@ mod tests {
                 payload,
             };
 
-            let len = packet.len();
+            let encoded_len = packet.encoded_len();
 
             let encoded = packet.encode();
 
-            assert_eq!(encoded.len(), len);
+            assert_eq!(encoded.len(), encoded_len);
 
             let decoded = UtpPacket::decode(&encoded).expect("failed to decode uTP packet");
 
