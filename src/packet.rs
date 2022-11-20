@@ -215,8 +215,8 @@ struct UtpPacketHeader {
     version: UtpVersion,
     extension: Extension,
     conn_id: u16,
-    ts_microseconds: u32,
-    ts_diff_microseconds: u32,
+    ts_micros: u32,
+    ts_diff_micros: u32,
     window_size: u32,
     seq_num: u16,
     ack_num: u16,
@@ -235,8 +235,8 @@ impl UtpPacketHeader {
         bytes.push(extension);
 
         bytes.extend(self.conn_id.to_be_bytes());
-        bytes.extend(self.ts_microseconds.to_be_bytes());
-        bytes.extend(self.ts_diff_microseconds.to_be_bytes());
+        bytes.extend(self.ts_micros.to_be_bytes());
+        bytes.extend(self.ts_diff_micros.to_be_bytes());
         bytes.extend(self.window_size.to_be_bytes());
         bytes.extend(self.seq_num.to_be_bytes());
         bytes.extend(self.ack_num.to_be_bytes());
@@ -261,11 +261,11 @@ impl UtpPacketHeader {
         let conn_id = [value[2], value[3]];
         let conn_id = u16::from_be_bytes(conn_id);
 
-        let ts_microseconds = [value[4], value[5], value[6], value[7]];
-        let ts_microseconds = u32::from_be_bytes(ts_microseconds);
+        let ts_micros = [value[4], value[5], value[6], value[7]];
+        let ts_micros = u32::from_be_bytes(ts_micros);
 
-        let ts_diff_microseconds = [value[8], value[9], value[10], value[11]];
-        let ts_diff_microseconds = u32::from_be_bytes(ts_diff_microseconds);
+        let ts_diff_micros = [value[8], value[9], value[10], value[11]];
+        let ts_diff_micros = u32::from_be_bytes(ts_diff_micros);
 
         let window_size = [value[12], value[13], value[14], value[15]];
         let window_size = u32::from_be_bytes(window_size);
@@ -281,8 +281,8 @@ impl UtpPacketHeader {
             version,
             extension,
             conn_id,
-            ts_microseconds,
-            ts_diff_microseconds,
+            ts_micros,
+            ts_diff_micros,
             window_size,
             seq_num,
             ack_num,
@@ -420,12 +420,12 @@ impl UtpPacket {
         self.header.conn_id
     }
 
-    pub fn ts_microseconds(&self) -> u32 {
-        self.header.ts_microseconds
+    pub fn ts_micros(&self) -> u32 {
+        self.header.ts_micros
     }
 
-    pub fn ts_diff_microseconds(&self) -> u32 {
-        self.header.ts_diff_microseconds
+    pub fn ts_diff_micros(&self) -> u32 {
+        self.header.ts_diff_micros
     }
 
     pub fn window_size(&self) -> u32 {
@@ -585,8 +585,8 @@ mod tests {
                 version: UtpVersion::One,
                 extension,
                 conn_id: u16::arbitrary(g),
-                ts_microseconds: u32::arbitrary(g),
-                ts_diff_microseconds: u32::arbitrary(g),
+                ts_micros: u32::arbitrary(g),
+                ts_diff_micros: u32::arbitrary(g),
                 window_size: u32::arbitrary(g),
                 ack_num: u16::arbitrary(g),
                 seq_num: u16::arbitrary(g),
