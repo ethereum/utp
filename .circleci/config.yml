@@ -1,0 +1,10 @@
+version: 2.1
+orbs:
+  rust: circleci/rust@1.6.0
+workflows:
+  prod:
+    jobs:
+      - rust/lint-test-build:
+          release: true
+          clippy-arguments: '--all-targets --all-features -- --deny warnings'
+
