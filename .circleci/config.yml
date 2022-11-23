@@ -6,5 +6,5 @@ workflows:
     jobs:
       - rust/lint-test-build:
           release: true
-          clippy-arguments: '--all-targets --all-features -- --deny warnings'
+          clippy_arguments: '--all-targets --all-features -- --deny warnings'
 
