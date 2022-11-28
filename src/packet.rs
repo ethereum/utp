@@ -610,7 +610,7 @@ mod tests {
                 }
             }
 
-            if bits.len() % 32 != 0 || acked.len() == 0 {
+            if bits.len() % 32 != 0 || acked.is_empty() {
                 acked.push(tmp);
             }
 
