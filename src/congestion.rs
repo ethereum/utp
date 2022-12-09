@@ -17,8 +17,8 @@ struct Packet {
 }
 
 #[derive(Clone, Debug)]
-pub enum Transmission {
-    Initial { packet_size_bytes: u32 },
+pub enum Transmit {
+    Initial { bytes: u32 },
     Retransmission,
 }
 
@@ -110,29 +110,25 @@ impl Controller {
     }
 
     /// Registers the transmission of a packet with the controller.
-    pub fn register_transmission(
-        &mut self,
-        seq_num: u16,
-        transmission: Transmission,
-    ) -> Result<(), Error> {
+    pub fn on_transmit(&mut self, seq_num: u16, transmission: Transmit) -> Result<(), Error> {
         // If the transmission is an initial transmission, then record the transmission. If the
         // transmission is a retransmission, then increment the number of transmissions for that
         // record.
         match transmission {
-            Transmission::Initial { packet_size_bytes } => {
+            Transmit::Initial { bytes } => {
                 if self.transmissions.contains_key(&seq_num) {
                     return Err(Error::DuplicateTransmission);
                 }
                 self.transmissions.insert(
                     seq_num,
                     Packet {
-                        size_bytes: packet_size_bytes,
+                        size_bytes: bytes,
                         num_transmissions: 1,
                         acked: false,
                     },
                 );
             }
-            Transmission::Retransmission => {
+            Transmit::Retransmission => {
                 let packet = self
                     .transmissions
                     .get_mut(&seq_num)
@@ -155,14 +151,14 @@ impl Controller {
 
         // If a timeout occurred, then register it.
         if self.timed_out_since_latest_ack() {
-            self.register_timeout();
+            self.on_timeout();
         }
 
         Ok(())
     }
 
     /// Registers a packet `Ack` with the controller.
-    pub fn register_ack(&mut self, seq_num: u16, ack: Ack) -> Result<(), Error> {
+    pub fn on_ack(&mut self, seq_num: u16, ack: Ack) -> Result<(), Error> {
         let packet = self
             .transmissions
             .get_mut(&seq_num)
@@ -254,18 +250,14 @@ impl Controller {
 
         // If a timeout occurred, then register it.
         if timed_out {
-            self.register_timeout();
+            self.on_timeout();
         }
 
         Ok(())
     }
 
     /// Registers a lost packet with the controller.
-    pub fn register_lost_packet(
-        &mut self,
-        seq_num: u16,
-        retransmitting: bool,
-    ) -> Result<(), Error> {
+    pub fn on_lost_packet(&mut self, seq_num: u16, retransmitting: bool) -> Result<(), Error> {
         let packet = self
             .transmissions
             .get(&seq_num)
@@ -284,7 +276,7 @@ impl Controller {
     }
 
     /// Registers a timeout with the controller.
-    fn register_timeout(&mut self) {
+    fn on_timeout(&mut self) {
         self.max_window_size_bytes = self.min_window_size_bytes;
         self.timeout *= 2;
     }
@@ -461,7 +453,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn register_transmission() {
+        fn on_transmit() {
             let mut ctrl = Controller::new(Config::default());
 
             let initial_timeout = ctrl.timeout();
@@ -469,10 +461,10 @@ mod tests {
             // Register the initial transmission of a packet with sequence number 1.
             let mut seq_num = 1;
             let packet_one_size_bytes = 32;
-            let transmission = Transmission::Initial {
-                packet_size_bytes: packet_one_size_bytes,
+            let transmission = Transmit::Initial {
+                bytes: packet_one_size_bytes,
             };
-            ctrl.register_transmission(seq_num, transmission)
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
             let transmission_record = ctrl
@@ -487,10 +479,10 @@ mod tests {
             // Register the initial transmission of a packet with sequence number 2.
             seq_num = 2;
             let packet_two_size_bytes = 128;
-            let transmission = Transmission::Initial {
-                packet_size_bytes: packet_two_size_bytes,
+            let transmission = Transmit::Initial {
+                bytes: packet_two_size_bytes,
             };
-            ctrl.register_transmission(seq_num, transmission)
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
             let transmission_record = ctrl
@@ -505,7 +497,7 @@ mod tests {
             );
 
             // Register the retransmission of the packet with sequence number 2.
-            ctrl.register_transmission(seq_num, Transmission::Retransmission)
+            ctrl.on_transmit(seq_num, Transmit::Retransmission)
                 .expect("transmission registration failed");
 
             let transmission_record = ctrl
@@ -523,55 +515,54 @@ mod tests {
         }
 
         #[test]
-        fn register_transmission_duplicate_transmission() {
+        fn on_transmit_duplicate_transmission() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
-            assert_eq!(ctrl.window_size_bytes, packet_size_bytes);
+            assert_eq!(ctrl.window_size_bytes, bytes);
 
             // Register the initial transmission of the SAME packet.
-            let transmission = Transmission::Initial { packet_size_bytes };
-            let result = ctrl.register_transmission(seq_num, transmission);
+            let transmission = Transmit::Initial { bytes };
+            let result = ctrl.on_transmit(seq_num, transmission);
             assert_eq!(result, Err(Error::DuplicateTransmission));
 
-            assert_eq!(ctrl.window_size_bytes, packet_size_bytes);
+            assert_eq!(ctrl.window_size_bytes, bytes);
         }
 
         #[test]
-        fn register_transmission_unknown_seq_num() {
+        fn on_transmit_unknown_seq_num() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the retransmission of the packet with sequence number 1.
             let seq_num = 1;
-            let result = ctrl.register_transmission(seq_num, Transmission::Retransmission);
+            let result = ctrl.on_transmit(seq_num, Transmit::Retransmission);
             assert_eq!(result, Err(Error::UnknownSeqNum));
 
             assert_eq!(ctrl.window_size_bytes, 0);
         }
 
         #[test]
-        fn register_transmission_insufficient_window_size() {
+        fn on_transmit_insufficient_window_size() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the transmission of a packet with sequence number 1 whose size EXCEEDS the
             // maximum window size.
             let seq_num = 1;
-            let packet_size_bytes = ctrl.max_window_size_bytes + 1;
-            let result =
-                ctrl.register_transmission(seq_num, Transmission::Initial { packet_size_bytes });
+            let bytes = ctrl.max_window_size_bytes + 1;
+            let result = ctrl.on_transmit(seq_num, Transmit::Initial { bytes });
             assert_eq!(result, Err(Error::InsufficientWindowSize));
 
             assert_eq!(ctrl.window_size_bytes, 0);
         }
 
         #[test]
-        fn register_transmission_after_timeout() {
+        fn on_transmit_after_timeout() {
             let mut ctrl = Controller::new(Config::default());
 
             // Set the latest acknowledgement timestamp such that the transmission registration
@@ -580,28 +571,28 @@ mod tests {
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
             // Create a separate controller in the same initial state, where we can explicitly
             // register a timeout.
             let mut ctrl_timeout = Controller::new(Config::default());
-            ctrl_timeout.register_timeout();
+            ctrl_timeout.on_timeout();
 
             assert_eq!(ctrl.timeout(), ctrl_timeout.timeout());
         }
 
         #[test]
-        fn register_ack() {
+        fn on_ack() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
             // Register the acknowledgement for the packet with sequence number 1.
@@ -613,8 +604,7 @@ mod tests {
                 rtt: ack_rtt,
                 received_at: ack_received_at,
             };
-            ctrl.register_ack(seq_num, ack)
-                .expect("ack registration failed");
+            ctrl.on_ack(seq_num, ack).expect("ack registration failed");
 
             assert_eq!(
                 ctrl.delay_acc
@@ -640,7 +630,7 @@ mod tests {
         }
 
         #[test]
-        fn register_ack_unknown_seq_num() {
+        fn on_ack_unknown_seq_num() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the acknowledgement for the packet with sequence number 1.
@@ -653,19 +643,19 @@ mod tests {
                 rtt: ack_rtt,
                 received_at: ack_received_at,
             };
-            let result = ctrl.register_ack(seq_num, ack);
+            let result = ctrl.on_ack(seq_num, ack);
             assert_eq!(result, Err(Error::UnknownSeqNum));
         }
 
         #[test]
-        fn register_ack_duplicate_ack() {
+        fn on_ack_duplicate_ack() {
             let mut ctrl = Controller::new(Config::default());
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
             // Register the acknowledgement for the packet with sequence number 1.
@@ -677,16 +667,16 @@ mod tests {
                 rtt: ack_rtt,
                 received_at: ack_received_at,
             };
-            ctrl.register_ack(seq_num, ack.clone())
+            ctrl.on_ack(seq_num, ack.clone())
                 .expect("ack registration failed");
 
             // Register the acknowledgement for the packet with sequence number 1 AGAIN.
-            let result = ctrl.register_ack(seq_num, ack);
+            let result = ctrl.on_ack(seq_num, ack);
             assert_eq!(result, Err(Error::DuplicateAck));
         }
 
         #[test]
-        fn register_lost_packet_retransmitting() {
+        fn on_lost_packet_retransmitting() {
             let mut ctrl = Controller::new(Config::default());
 
             let initial_max_window_size_bytes = ctrl.min_window_size_bytes * 10;
@@ -694,18 +684,18 @@ mod tests {
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
-            assert_eq!(ctrl.window_size_bytes, packet_size_bytes);
+            assert_eq!(ctrl.window_size_bytes, bytes);
 
             // Register the loss of the packet with sequence number 1. Specify that we WILL attempt
             // to retransmit.
-            ctrl.register_lost_packet(seq_num, true)
+            ctrl.on_lost_packet(seq_num, true)
                 .expect("lost packet registration failed");
-            assert_eq!(ctrl.window_size_bytes, packet_size_bytes);
+            assert_eq!(ctrl.window_size_bytes, bytes);
             assert!(ctrl.max_window_size_bytes >= ctrl.min_window_size_bytes);
             assert_eq!(
                 ctrl.max_window_size_bytes,
@@ -714,7 +704,7 @@ mod tests {
         }
 
         #[test]
-        fn register_lost_packet_not_retransmitting() {
+        fn on_lost_packet_not_retransmitting() {
             let mut ctrl = Controller::new(Config::default());
 
             let initial_max_window_size_bytes = ctrl.min_window_size_bytes * 10;
@@ -722,16 +712,16 @@ mod tests {
 
             // Register the initial transmission of a packet with sequence number 1.
             let seq_num = 1;
-            let packet_size_bytes = 32;
-            let transmission = Transmission::Initial { packet_size_bytes };
-            ctrl.register_transmission(seq_num, transmission)
+            let bytes = 32;
+            let transmission = Transmit::Initial { bytes };
+            ctrl.on_transmit(seq_num, transmission)
                 .expect("transmission registration failed");
 
-            assert_eq!(ctrl.window_size_bytes, packet_size_bytes);
+            assert_eq!(ctrl.window_size_bytes, bytes);
 
             // Register the loss of the packet with sequence number 1. Specify that we WILL NOT
             // attempt to retransmit.
-            ctrl.register_lost_packet(seq_num, false)
+            ctrl.on_lost_packet(seq_num, false)
                 .expect("lost packet registration failed");
             assert_eq!(ctrl.window_size_bytes, 0);
             assert!(ctrl.max_window_size_bytes >= ctrl.min_window_size_bytes);
@@ -742,7 +732,7 @@ mod tests {
         }
 
         #[test]
-        fn register_lost_packet_unknown_seq_num() {
+        fn on_lost_packet_unknown_seq_num() {
             let mut ctrl = Controller::new(Config::default());
 
             let initial_max_window_size_bytes = ctrl.min_window_size_bytes * 10;
@@ -750,14 +740,14 @@ mod tests {
 
             // Register the loss of the packet with sequence number 1.
             let seq_num = 1;
-            let result = ctrl.register_lost_packet(seq_num, false);
+            let result = ctrl.on_lost_packet(seq_num, false);
             assert_eq!(result, Err(Error::UnknownSeqNum));
             assert_eq!(ctrl.window_size_bytes, 0);
             assert_eq!(ctrl.max_window_size_bytes, initial_max_window_size_bytes);
         }
 
         #[test]
-        fn register_timeout() {
+        fn on_timeout() {
             let mut ctrl = Controller::new(Config::default());
 
             let initial_max_window_size_bytes = ctrl.min_window_size_bytes * 10;
@@ -766,7 +756,7 @@ mod tests {
             let initial_timeout = ctrl.timeout();
 
             // Register a timeout.
-            ctrl.register_timeout();
+            ctrl.on_timeout();
             assert_eq!(ctrl.max_window_size_bytes, ctrl.min_window_size_bytes);
             assert_eq!(ctrl.timeout, initial_timeout * 2);
         }
