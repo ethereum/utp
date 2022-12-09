@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Size of an encoded uTP header in bytes.
-const UTP_PACKET_HEADER_LEN: usize = 20;
+const PACKET_HEADER_LEN: usize = 20;
 
 /// Size of a Selective ACK segment in bits.
 const SELECTIVE_ACK_BITS: usize = 32;
@@ -13,18 +13,18 @@ const EXTENSION_TYPE_LEN: usize = 1;
 const EXTENSION_LEN_LEN: usize = 1;
 
 #[derive(Copy, Clone, Debug)]
-pub struct InvalidUtpPacketType;
+pub struct InvalidPacketType;
 
-impl fmt::Display for InvalidUtpPacketType {
+impl fmt::Display for InvalidPacketType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "invalid uTP packet type")
     }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct InvalidUtpVersion;
+pub struct InvalidVersion;
 
-impl fmt::Display for InvalidUtpVersion {
+impl fmt::Display for InvalidVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "invalid uTP version")
     }
@@ -36,9 +36,9 @@ pub enum SelectiveAckError {
     InvalidLen,
 }
 
-impl From<SelectiveAckError> for UtpPacketError {
+impl From<SelectiveAckError> for PacketError {
     fn from(value: SelectiveAckError) -> Self {
-        Self::InvalidExtension(UtpExtensionError::from(value))
+        Self::InvalidExtension(ExtensionError::from(value))
     }
 }
 
@@ -54,18 +54,18 @@ impl fmt::Display for SelectiveAckError {
 }
 
 #[derive(Clone, Debug)]
-pub enum UtpExtensionError {
+pub enum ExtensionError {
     InsufficientLen,
     InvalidSelectiveAck(SelectiveAckError),
 }
 
-impl From<SelectiveAckError> for UtpExtensionError {
+impl From<SelectiveAckError> for ExtensionError {
     fn from(value: SelectiveAckError) -> Self {
         Self::InvalidSelectiveAck(value)
     }
 }
 
-impl fmt::Display for UtpExtensionError {
+impl fmt::Display for ExtensionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s: String = match self {
             Self::InsufficientLen => String::from("insufficient extension len"),
@@ -77,53 +77,53 @@ impl fmt::Display for UtpExtensionError {
 }
 
 #[derive(Clone, Debug)]
-pub enum UtpPacketHeaderError {
-    InvalidPacketType(InvalidUtpPacketType),
-    InvalidVersion(InvalidUtpVersion),
-    InvalidExtension(UtpExtensionError),
+pub enum PacketHeaderError {
+    InvalidPacketType(InvalidPacketType),
+    InvalidVersion(InvalidVersion),
+    InvalidExtension(ExtensionError),
     InvalidLen,
 }
 
-impl From<InvalidUtpPacketType> for UtpPacketHeaderError {
-    fn from(value: InvalidUtpPacketType) -> Self {
+impl From<InvalidPacketType> for PacketHeaderError {
+    fn from(value: InvalidPacketType) -> Self {
         Self::InvalidPacketType(value)
     }
 }
 
-impl From<InvalidUtpVersion> for UtpPacketHeaderError {
-    fn from(value: InvalidUtpVersion) -> Self {
+impl From<InvalidVersion> for PacketHeaderError {
+    fn from(value: InvalidVersion) -> Self {
         Self::InvalidVersion(value)
     }
 }
 
-impl From<UtpExtensionError> for UtpPacketHeaderError {
-    fn from(value: UtpExtensionError) -> Self {
+impl From<ExtensionError> for PacketHeaderError {
+    fn from(value: ExtensionError) -> Self {
         Self::InvalidExtension(value)
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum UtpPacketError {
-    InvalidHeader(UtpPacketHeaderError),
-    InvalidExtension(UtpExtensionError),
+pub enum PacketError {
+    InvalidHeader(PacketHeaderError),
+    InvalidExtension(ExtensionError),
     InvalidLen,
     EmptyDataPayload,
 }
 
-impl From<UtpPacketHeaderError> for UtpPacketError {
-    fn from(value: UtpPacketHeaderError) -> Self {
+impl From<PacketHeaderError> for PacketError {
+    fn from(value: PacketHeaderError) -> Self {
         Self::InvalidHeader(value)
     }
 }
 
-impl From<UtpExtensionError> for UtpPacketError {
-    fn from(value: UtpExtensionError) -> Self {
+impl From<ExtensionError> for PacketError {
+    fn from(value: ExtensionError) -> Self {
         Self::InvalidExtension(value)
     }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum UtpPacketType {
+pub enum PacketType {
     Data,
     Fin,
     State,
@@ -131,8 +131,8 @@ pub enum UtpPacketType {
     Syn,
 }
 
-impl TryFrom<u8> for UtpPacketType {
-    type Error = InvalidUtpPacketType;
+impl TryFrom<u8> for PacketType {
+    type Error = InvalidPacketType;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -141,43 +141,43 @@ impl TryFrom<u8> for UtpPacketType {
             2 => Ok(Self::State),
             3 => Ok(Self::Reset),
             4 => Ok(Self::Syn),
-            _ => Err(InvalidUtpPacketType),
+            _ => Err(InvalidPacketType),
         }
     }
 }
 
-impl From<UtpPacketType> for u8 {
-    fn from(value: UtpPacketType) -> u8 {
+impl From<PacketType> for u8 {
+    fn from(value: PacketType) -> u8 {
         match value {
-            UtpPacketType::Data => 0,
-            UtpPacketType::Fin => 1,
-            UtpPacketType::State => 2,
-            UtpPacketType::Reset => 3,
-            UtpPacketType::Syn => 4,
+            PacketType::Data => 0,
+            PacketType::Fin => 1,
+            PacketType::State => 2,
+            PacketType::Reset => 3,
+            PacketType::Syn => 4,
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum UtpVersion {
+enum Version {
     One,
 }
 
-impl TryFrom<u8> for UtpVersion {
-    type Error = InvalidUtpVersion;
+impl TryFrom<u8> for Version {
+    type Error = InvalidVersion;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::One),
-            _ => Err(InvalidUtpVersion),
+            _ => Err(InvalidVersion),
         }
     }
 }
 
-impl From<UtpVersion> for u8 {
-    fn from(value: UtpVersion) -> u8 {
+impl From<Version> for u8 {
+    fn from(value: Version) -> u8 {
         match value {
-            UtpVersion::One => 1,
+            Version::One => 1,
         }
     }
 }
@@ -210,9 +210,9 @@ impl From<Extension> for u8 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct UtpPacketHeader {
-    packet_type: UtpPacketType,
-    version: UtpVersion,
+struct PacketHeader {
+    packet_type: PacketType,
+    version: Version,
     extension: Extension,
     conn_id: u16,
     ts_micros: u32,
@@ -222,7 +222,7 @@ struct UtpPacketHeader {
     ack_num: u16,
 }
 
-impl UtpPacketHeader {
+impl PacketHeader {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![];
 
@@ -244,16 +244,16 @@ impl UtpPacketHeader {
         bytes
     }
 
-    pub fn decode(value: &[u8]) -> Result<Self, UtpPacketHeaderError> {
-        if value.len() != UTP_PACKET_HEADER_LEN {
-            return Err(UtpPacketHeaderError::InvalidLen);
+    pub fn decode(value: &[u8]) -> Result<Self, PacketHeaderError> {
+        if value.len() != PACKET_HEADER_LEN {
+            return Err(PacketHeaderError::InvalidLen);
         }
 
         let packet_type = value[0] >> 4;
-        let packet_type = UtpPacketType::try_from(u8::from_be(packet_type))?;
+        let packet_type = PacketType::try_from(u8::from_be(packet_type))?;
 
         let version = value[0] & 0x0F;
-        let version = UtpVersion::try_from(u8::from_be(version))?;
+        let version = Version::try_from(u8::from_be(version))?;
 
         let extension = u8::from_be(value[1]);
         let extension = Extension::from(extension);
@@ -405,14 +405,14 @@ impl SelectiveAck {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UtpPacket {
-    header: UtpPacketHeader,
+pub struct Packet {
+    header: PacketHeader,
     selective_ack: Option<SelectiveAck>,
     payload: Vec<u8>,
 }
 
-impl UtpPacket {
-    pub fn packet_type(&self) -> UtpPacketType {
+impl Packet {
+    pub fn packet_type(&self) -> PacketType {
         self.header.packet_type
     }
 
@@ -450,7 +450,7 @@ impl UtpPacket {
 
     /// Returns the length in bytes of the encoded packet.
     pub fn encoded_len(&self) -> usize {
-        let mut len = UTP_PACKET_HEADER_LEN;
+        let mut len = PACKET_HEADER_LEN;
         if let Some(ref sack) = self.selective_ack {
             len += sack.encoded_len() + EXTENSION_TYPE_LEN + EXTENSION_LEN_LEN;
         }
@@ -474,19 +474,17 @@ impl UtpPacket {
         bytes
     }
 
-    pub fn decode(value: &[u8]) -> Result<Self, UtpPacketError> {
-        if value.len() < UTP_PACKET_HEADER_LEN {
-            return Err(UtpPacketError::InvalidHeader(
-                UtpPacketHeaderError::InvalidLen,
-            ));
+    pub fn decode(value: &[u8]) -> Result<Self, PacketError> {
+        if value.len() < PACKET_HEADER_LEN {
+            return Err(PacketError::InvalidHeader(PacketHeaderError::InvalidLen));
         }
 
-        let mut header: [u8; UTP_PACKET_HEADER_LEN] = [0; UTP_PACKET_HEADER_LEN];
-        header.copy_from_slice(&value[..UTP_PACKET_HEADER_LEN]);
-        let header = UtpPacketHeader::decode(&header)?;
+        let mut header: [u8; PACKET_HEADER_LEN] = [0; PACKET_HEADER_LEN];
+        header.copy_from_slice(&value[..PACKET_HEADER_LEN]);
+        let header = PacketHeader::decode(&header)?;
 
         let (extensions, extensions_len) =
-            Self::decode_raw_extensions(header.extension, &value[UTP_PACKET_HEADER_LEN..])?;
+            Self::decode_raw_extensions(header.extension, &value[PACKET_HEADER_LEN..])?;
 
         // Look for the first (if any) Selective ACK extension, and attempt to decode it.
         // TODO: Evaluate whether duplicate extensions should constitute an error.
@@ -502,15 +500,15 @@ impl UtpPacket {
         // custom extensions.
 
         // The packet payload is the remainder of the packet.
-        let payload_start_index = UTP_PACKET_HEADER_LEN + extensions_len;
+        let payload_start_index = PACKET_HEADER_LEN + extensions_len;
         let payload = if payload_start_index == value.len() {
             vec![]
         } else {
             value[payload_start_index..].to_vec()
         };
 
-        if header.packet_type == UtpPacketType::Data && payload.is_empty() {
-            return Err(UtpPacketError::EmptyDataPayload);
+        if header.packet_type == PacketType::Data && payload.is_empty() {
+            return Err(PacketError::EmptyDataPayload);
         }
 
         Ok(Self {
@@ -525,14 +523,14 @@ impl UtpPacket {
     fn decode_raw_extensions(
         first_ext: Extension,
         data: &[u8],
-    ) -> Result<(Vec<(Extension, Vec<u8>)>, usize), UtpExtensionError> {
+    ) -> Result<(Vec<(Extension, Vec<u8>)>, usize), ExtensionError> {
         let mut ext = first_ext;
         let mut index = 0;
 
         let mut extensions: Vec<(Extension, Vec<u8>)> = Vec::new();
         while ext != Extension::None {
             if data[index..].len() < 2 {
-                return Err(UtpExtensionError::InsufficientLen);
+                return Err(ExtensionError::InsufficientLen);
             }
 
             let next_ext = u8::from_be_bytes([data[index]]);
@@ -542,7 +540,7 @@ impl UtpPacket {
 
             let ext_start = index + 2;
             if data[ext_start..].len() < ext_len {
-                return Err(UtpExtensionError::InsufficientLen);
+                return Err(ExtensionError::InsufficientLen);
             }
 
             let ext_data = data[ext_start..ext_start + ext_len].to_vec();
@@ -562,19 +560,19 @@ mod tests {
 
     use quickcheck::{quickcheck, Arbitrary, Gen, TestResult};
 
-    impl Arbitrary for UtpPacketHeader {
+    impl Arbitrary for PacketHeader {
         fn arbitrary(g: &mut Gen) -> Self {
             let packet_type = u8::arbitrary(g);
             let packet_type = if packet_type % 5 == 0 {
-                UtpPacketType::Data
+                PacketType::Data
             } else if packet_type % 5 == 1 {
-                UtpPacketType::Fin
+                PacketType::Fin
             } else if packet_type % 5 == 2 {
-                UtpPacketType::State
+                PacketType::State
             } else if packet_type % 5 == 3 {
-                UtpPacketType::Reset
+                PacketType::Reset
             } else {
-                UtpPacketType::Syn
+                PacketType::Syn
             };
 
             let extension = u8::arbitrary(g);
@@ -582,7 +580,7 @@ mod tests {
 
             Self {
                 packet_type,
-                version: UtpVersion::One,
+                version: Version::One,
                 extension,
                 conn_id: u16::arbitrary(g),
                 ts_micros: u32::arbitrary(g),
@@ -623,17 +621,17 @@ mod tests {
 
     #[test]
     fn header_encode_decode() {
-        fn prop(header: UtpPacketHeader) -> TestResult {
+        fn prop(header: PacketHeader) -> TestResult {
             let encoded = header.encode();
             let encoded: [u8; 20] = encoded
                 .try_into()
                 .expect("invalid length for encoded uTP packet header");
             let decoded =
-                UtpPacketHeader::decode(&encoded).expect("failed to decode uTP packet header");
+                PacketHeader::decode(&encoded).expect("failed to decode uTP packet header");
 
             TestResult::from_bool(decoded == header)
         }
-        quickcheck(prop as fn(UtpPacketHeader) -> TestResult);
+        quickcheck(prop as fn(PacketHeader) -> TestResult);
     }
 
     #[test]
@@ -656,7 +654,7 @@ mod tests {
     #[test]
     fn packet_encode_decode() {
         fn prop(
-            mut header: UtpPacketHeader,
+            mut header: PacketHeader,
             selective_ack: SelectiveAck,
             payload: Vec<u8>,
         ) -> TestResult {
@@ -678,7 +676,7 @@ mod tests {
                 }
             }
 
-            let packet = UtpPacket {
+            let packet = Packet {
                 header,
                 selective_ack,
                 payload,
@@ -690,10 +688,10 @@ mod tests {
 
             assert_eq!(encoded.len(), encoded_len);
 
-            let decoded = UtpPacket::decode(&encoded).expect("failed to decode uTP packet");
+            let decoded = Packet::decode(&encoded).expect("failed to decode uTP packet");
 
             TestResult::from_bool(decoded == packet)
         }
-        quickcheck(prop as fn(UtpPacketHeader, SelectiveAck, Vec<u8>) -> TestResult);
+        quickcheck(prop as fn(PacketHeader, SelectiveAck, Vec<u8>) -> TestResult);
     }
 }
