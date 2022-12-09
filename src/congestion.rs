@@ -42,7 +42,7 @@ pub struct Config {
     pub target_delay_micros: u32,
     pub initial_timeout: Duration,
     pub min_timeout: Duration,
-    pub max_bytes: u32,
+    pub max_packet_size_bytes: u32,
     pub max_window_size_inc_bytes: u32,
     pub gain: f32,
     pub delay_window: Duration,
@@ -54,7 +54,7 @@ impl Default for Config {
             target_delay_micros: DEFAULT_TARGET_MICROS,
             initial_timeout: DEFAULT_INITIAL_TIMEOUT,
             min_timeout: DEFAULT_MIN_TIMEOUT,
-            max_bytes: DEFAULT_MAX_PACKET_SIZE_BYTES,
+            max_packet_size_bytes: DEFAULT_MAX_PACKET_SIZE_BYTES,
             max_window_size_inc_bytes: DEFAULT_MAX_PACKET_SIZE_BYTES,
             gain: DEFAULT_GAIN,
             delay_window: DEFAULT_DELAY_WINDOW,
@@ -87,8 +87,8 @@ impl Controller {
             timeout: config.initial_timeout,
             min_timeout: config.min_timeout,
             window_size_bytes: 0,
-            max_window_size_bytes: 2 * config.max_bytes,
-            min_window_size_bytes: 2 * config.max_bytes,
+            max_window_size_bytes: 2 * config.max_packet_size_bytes,
+            min_window_size_bytes: 2 * config.max_packet_size_bytes,
             max_window_size_inc_bytes: config.max_window_size_inc_bytes,
             gain: config.gain,
             rtt: Duration::ZERO,
@@ -332,7 +332,7 @@ fn compute_max_window_size_adjustment(
     base_delay_micros: u32,
     packet_delay_micros: u32,
     window_size_bytes: u32,
-    bytes: u32,
+    packet_size_bytes: u32,
     max_window_size_inc_bytes: u32,
     gain: f32,
 ) -> i64 {
@@ -346,7 +346,7 @@ fn compute_max_window_size_adjustment(
 
     let off_target_micros = i64::from(target_delay_micros) - delay_micros;
     let delay_factor = (off_target_micros as f64) / f64::from(target_delay_micros);
-    let window_factor = f64::from(bytes) / f64::from(window_size_bytes);
+    let window_factor = f64::from(packet_size_bytes) / f64::from(window_size_bytes);
 
     let scaled_gain =
         f64::from(gain) * f64::from(max_window_size_inc_bytes) * delay_factor * window_factor;
