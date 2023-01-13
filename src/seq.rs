@@ -1,18 +1,3 @@
-/// A uTP sequence number.
-pub struct SeqNum(u16);
-
-impl SeqNum {
-    /// Returns a new sequence number with value `num`.
-    pub fn new(num: u16) -> Self {
-        Self(num)
-    }
-
-    /// Increments the sequence number by `amount` with addition modulo `u16::MAX`.
-    pub fn inc(&mut self, amount: u16) {
-        self.0 = self.0.wrapping_add(amount);
-    }
-}
-
 /// A range bounded inclusively below and above that supports wrapping arithmetic.
 ///
 /// If `end < start`, then the range contains all values `x` such that `start <= x <= u16::MAX` and
@@ -48,12 +33,10 @@ impl CircularRangeInclusive {
     pub fn contains(&self, item: u16) -> bool {
         if self.end >= self.start {
             item >= self.start && item <= self.end
+        } else if item >= self.start {
+            true
         } else {
-            if item >= self.start {
-                true
-            } else {
-                item <= self.end
-            }
+            item <= self.end
         }
     }
 }
@@ -64,14 +47,12 @@ impl std::iter::Iterator for CircularRangeInclusive {
     fn next(&mut self) -> Option<Self::Item> {
         if self.exhausted {
             None
+        } else if self.start == self.end {
+            self.exhausted = true;
+            Some(self.end)
         } else {
-            if self.start == self.end {
-                self.exhausted = true;
-                Some(self.end)
-            } else {
-                let step = self.start.wrapping_add(1);
-                Some(std::mem::replace(&mut self.start, step))
-            }
+            let step = self.start.wrapping_add(1);
+            Some(std::mem::replace(&mut self.start, step))
         }
     }
 }
