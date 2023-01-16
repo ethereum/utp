@@ -27,6 +27,7 @@ impl<const N: usize> ReceiveBuffer<N> {
         N - self.offset - self.pending.values().fold(0, |acc, data| acc + data.len())
     }
 
+    /// Reads data from the buffer into `buf`, returning the number of bytes read.
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -42,6 +43,16 @@ impl<const N: usize> ReceiveBuffer<N> {
         Ok(n)
     }
 
+    /// Writes `data` into the buffer at `seq_num`.
+    ///
+    /// If `start` is `true`, then `seq_num` is taken as the initial sequence number.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `start` is `true` and `seq_num` is different from a previous call to `write`
+    /// where `start` was `true`.
+    ///
+    /// Panics if `data.len()` is greater than the amount of available bytes in the buffer.
     pub fn write(&mut self, data: &[u8], seq_num: u16, start: bool) {
         if data.len() > self.available() {
             panic!();
