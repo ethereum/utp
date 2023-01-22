@@ -74,7 +74,6 @@ pub struct Controller {
     gain: f32,
     rtt: Duration,
     rtt_variance_micros: u64,
-    latest_ack: Option<Instant>,
     transmissions: HashMap<u16, Packet>,
     delay_acc: DelayAccumulator,
 }
@@ -93,7 +92,6 @@ impl Controller {
             gain: config.gain,
             rtt: Duration::ZERO,
             rtt_variance_micros: 0,
-            latest_ack: None,
             transmissions: HashMap::new(),
             delay_acc: DelayAccumulator::new(config.delay_window),
         }
@@ -199,9 +197,6 @@ impl Controller {
         // correspond to an invalid operation as the window size should account for the size of the
         // packet being acknowledged.
         self.window_size_bytes -= packet.size_bytes;
-
-        // Update latest acknowledgement timestamp.
-        self.latest_ack = Some(ack.received_at);
 
         // Only adjust the round trip time (RTT) estimation if the acknowledgement corresponds to
         // the first transmission. The congestion timeout is also adjusted each time the RTT
@@ -566,11 +561,6 @@ mod tests {
             // TODO: max window
 
             assert_eq!(ctrl.window_size_bytes, 0);
-
-            assert_eq!(
-                ctrl.latest_ack.expect("ack not recorded as latest ack"),
-                ack_received_at,
-            );
 
             // TODO: RTT variance
 
