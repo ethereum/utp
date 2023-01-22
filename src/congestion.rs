@@ -74,7 +74,6 @@ pub struct Controller {
     gain: f32,
     rtt: Duration,
     rtt_variance_micros: u64,
-    latest_ack: Option<Instant>,
     transmissions: HashMap<u16, Packet>,
     delay_acc: DelayAccumulator,
 }
@@ -93,7 +92,6 @@ impl Controller {
             gain: config.gain,
             rtt: Duration::ZERO,
             rtt_variance_micros: 0,
-            latest_ack: None,
             transmissions: HashMap::new(),
             delay_acc: DelayAccumulator::new(config.delay_window),
         }
@@ -149,11 +147,6 @@ impl Controller {
             self.window_size_bytes += packet.size_bytes;
         }
 
-        // If a timeout occurred, then register it.
-        if self.timed_out_since_latest_ack() {
-            self.on_timeout();
-        }
-
         Ok(())
     }
 
@@ -205,13 +198,6 @@ impl Controller {
         // packet being acknowledged.
         self.window_size_bytes -= packet.size_bytes;
 
-        // Record whether a timeout occurred before a possible adjustment to the timeout and before
-        // the update to the timestamp of the latest acknowledgement.
-        let timed_out = self.timed_out_since_latest_ack();
-
-        // Update latest acknowledgement timestamp.
-        self.latest_ack = Some(ack.received_at);
-
         // Only adjust the round trip time (RTT) estimation if the acknowledgement corresponds to
         // the first transmission. The congestion timeout is also adjusted each time the RTT
         // estimation is adjusted.
@@ -248,11 +234,6 @@ impl Controller {
             self.apply_timeout_adjustment();
         }
 
-        // If a timeout occurred, then register it.
-        if timed_out {
-            self.on_timeout();
-        }
-
         Ok(())
     }
 
@@ -276,22 +257,9 @@ impl Controller {
     }
 
     /// Registers a timeout with the controller.
-    fn on_timeout(&mut self) {
+    pub fn on_timeout(&mut self) {
         self.max_window_size_bytes = self.min_window_size_bytes;
         self.timeout *= 2;
-    }
-
-    /// Returns whether a timeout has occurred based on the latest acknowledgement.
-    fn timed_out_since_latest_ack(&self) -> bool {
-        // If the duration since the prior latest acknowledgement is greater than or equal to the
-        // congestion timeout, then register a timeout.
-        if let Some(latest_ack) = self.latest_ack {
-            if Instant::now().duration_since(latest_ack) >= self.timeout {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Adjusts the maximum window (i.e. congestion window) by `adjustment`, keeping the size of
@@ -562,29 +530,6 @@ mod tests {
         }
 
         #[test]
-        fn on_transmit_after_timeout() {
-            let mut ctrl = Controller::new(Config::default());
-
-            // Set the latest acknowledgement timestamp such that the transmission registration
-            // occurs AFTER the timeout.
-            ctrl.latest_ack = Some(Instant::now() - ctrl.timeout());
-
-            // Register the initial transmission of a packet with sequence number 1.
-            let seq_num = 1;
-            let bytes = 32;
-            let transmission = Transmit::Initial { bytes };
-            ctrl.on_transmit(seq_num, transmission)
-                .expect("transmission registration failed");
-
-            // Create a separate controller in the same initial state, where we can explicitly
-            // register a timeout.
-            let mut ctrl_timeout = Controller::new(Config::default());
-            ctrl_timeout.on_timeout();
-
-            assert_eq!(ctrl.timeout(), ctrl_timeout.timeout());
-        }
-
-        #[test]
         fn on_ack() {
             let mut ctrl = Controller::new(Config::default());
 
@@ -616,11 +561,6 @@ mod tests {
             // TODO: max window
 
             assert_eq!(ctrl.window_size_bytes, 0);
-
-            assert_eq!(
-                ctrl.latest_ack.expect("ack not recorded as latest ack"),
-                ack_received_at,
-            );
 
             // TODO: RTT variance
 
