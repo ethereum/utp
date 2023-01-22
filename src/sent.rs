@@ -309,7 +309,7 @@ impl SentPackets {
             }
         }
 
-        return num;
+        num
     }
 
     /// Returns the sequence number of the first (i.e. earliest) packet that has not been
