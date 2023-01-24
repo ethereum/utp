@@ -129,7 +129,6 @@ mod test {
         assert_eq!(buf.available(), SIZE);
 
         const DATA_LEN: usize = 256;
-        assert!(DATA_LEN > 0 && DATA_LEN < SIZE);
 
         // Write out-of-order packet.
         let data = vec![0xef; DATA_LEN];
@@ -169,7 +168,6 @@ mod test {
         let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
 
         const DATA_LEN: usize = 256;
-        assert!(DATA_LEN > 0 && DATA_LEN < SIZE);
 
         // Write out-of-order packet.
         let data_second = vec![0xef; DATA_LEN];
@@ -208,7 +206,6 @@ mod test {
         let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
 
         const DATA_LEN: usize = 256;
-        assert!(DATA_LEN > 0 && DATA_LEN < SIZE);
 
         // Write out-of-order packet.
         let data_second = vec![0xef; DATA_LEN];
