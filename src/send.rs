@@ -8,6 +8,15 @@ pub struct SendBuffer<const N: usize> {
     offset: usize,
 }
 
+impl<const N: usize> Default for SendBuffer<N> {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            offset: 0,
+        }
+    }
+}
+
 impl<const N: usize> SendBuffer<N> {
     /// Creates a new buffer.
     pub fn new() -> Self {
@@ -27,10 +36,10 @@ impl<const N: usize> SendBuffer<N> {
         let available = self.available();
         if data.len() <= available {
             self.pending.push_back(data.to_vec());
-            return Ok(data.len());
+            Ok(data.len())
         } else {
             self.pending.push_back(data[..available].to_vec());
-            return Ok(available);
+            Ok(available)
         }
     }
 
@@ -76,7 +85,6 @@ mod test {
         const NUM_WRITES: usize = 3;
 
         const READ_LEN: usize = 64;
-        assert!(READ_LEN < WRITE_LEN);
 
         for _ in 0..NUM_WRITES {
             let data = vec![0; WRITE_LEN];
@@ -96,6 +104,7 @@ mod test {
     }
 
     #[test]
+    #[allow(clippy::read_zero_byte_vec)]
     fn read() {
         let mut buf = SendBuffer::<SIZE>::new();
 
@@ -105,11 +114,8 @@ mod test {
         assert_eq!(read, 0);
 
         const WRITE_LEN: usize = 1024;
-        assert!(WRITE_LEN < SIZE);
 
         const READ_LEN: usize = 784;
-        assert!(READ_LEN < WRITE_LEN);
-        assert!(READ_LEN > WRITE_LEN / 2);
 
         let mut read_buf = vec![0; READ_LEN];
 
@@ -145,7 +151,6 @@ mod test {
         let mut buf = SendBuffer::<SIZE>::new();
 
         const WRITE_LEN: usize = 1024;
-        assert!(WRITE_LEN < SIZE);
 
         let data = vec![0xef; WRITE_LEN];
         let written = buf.write(data.as_slice()).unwrap();
