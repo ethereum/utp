@@ -448,11 +448,10 @@ mod test {
         }
 
         const SACK_LEN: usize = COUNT - 2;
-        assert!(SACK_LEN > 0);
         let mut acked = vec![false; SACK_LEN];
-        for i in 0..SACK_LEN {
+        for (i, ack) in acked.iter_mut().enumerate() {
             if i % 2 == 0 {
-                acked[i] = true;
+                *ack = true;
             }
         }
         let selective_ack = SelectiveAck::new(acked);
@@ -482,7 +481,6 @@ mod test {
 
         const COUNT: usize = 10;
         const START: usize = COUNT - LOSS_THRESHOLD;
-        assert!(START < COUNT);
         for i in 0..COUNT {
             let now = Instant::now();
             let seq_num = sent_packets.next_seq_num();
