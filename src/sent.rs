@@ -33,6 +33,8 @@ pub struct SentPackets {
 }
 
 impl SentPackets {
+    /// Note: `init_seq_num` corresponds to the sequence number just before the sequence number of
+    /// the first packet to track.
     pub fn new(init_seq_num: u16) -> Self {
         Self {
             packets: Vec::new(),
@@ -188,8 +190,8 @@ impl SentPackets {
 
         let range = self.seq_num_range();
 
-        // The first bit of the selective ACK corresponds to `ack_num + 2`, where `ack_num + 1` is
-        // assumed to have been dropped.
+        // The first bit of the selective ACK corresponds to `ack_num.wrapping_add(2)`, where
+        // `ack_num.wrapping_add(1)` is assumed to have been dropped.
         let mut sack_num = ack_num.wrapping_add(2);
         for ack in selective_ack.acked() {
             // Break once we exhaust all sent sequence numbers. The selective ACK length is a
@@ -283,10 +285,11 @@ impl SentPackets {
 
     /// Returns the "normalized" index for `seq_num` based on the initial sequence number.
     fn seq_num_index(&self, seq_num: u16) -> usize {
+        // The first sequence number is equal to `self.init_seq_num.wrapping_add(1)`.
         if seq_num > self.init_seq_num {
-            usize::from(seq_num - self.init_seq_num)
+            usize::from(seq_num - self.init_seq_num - 1)
         } else {
-            usize::from(u16::MAX - self.init_seq_num + seq_num)
+            usize::from((u16::MAX - self.init_seq_num).wrapping_add(seq_num))
         }
     }
 
@@ -559,5 +562,19 @@ mod test {
         let unsent_ack_num = init_seq_num.wrapping_add(2);
         let now = Instant::now();
         sent_packets.ack(unsent_ack_num, DELAY, now);
+    }
+
+    #[test]
+    fn seq_num_index() {
+        let init_seq_num = u16::MAX;
+        let sent_packets = SentPackets::new(init_seq_num);
+
+        assert_eq!(
+            sent_packets.seq_num_index(init_seq_num),
+            usize::from(u16::MAX)
+        );
+
+        let zero = init_seq_num.wrapping_add(1);
+        assert_eq!(sent_packets.seq_num_index(zero), 0);
     }
 }
