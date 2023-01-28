@@ -6,6 +6,7 @@ use crate::packet::{Packet, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::sent::SentPackets;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
     EmptyDataPayload,
     InvalidAckNum,
@@ -16,12 +17,19 @@ enum Error {
     SynFromAcceptor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
-    // TODO: Add initiated timestamp?
-    Initiator(u16),
+    Initiator((u16, Option<Instant>)),
     Acceptor((u16, u16)),
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PeerState {
+    ts_diff_micros: u32,
+    recv_window: u32,
+}
+
+#[derive(Clone)]
 enum State<const N: usize> {
     Connecting,
     Established {
@@ -63,7 +71,7 @@ impl<const N: usize> Connection<N> {
             }
             None => {
                 let syn = rand::random();
-                Endpoint::Initiator(syn)
+                Endpoint::Initiator((syn, None))
             }
         };
 
@@ -83,8 +91,7 @@ impl<const N: usize> Connection<N> {
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
             PacketType::State => {
-                // TODO
-                let delay = Duration::from_millis(100);
+                let delay = Duration::from_micros(packet.ts_diff_micros().into());
                 self.on_state(
                     packet.seq_num(),
                     packet.ack_num(),
@@ -144,7 +151,7 @@ impl<const N: usize> Connection<N> {
         match &mut self.state {
             State::Connecting => match self.endpoint {
                 // If the STATE acknowledges our SYN, then mark the connection established.
-                Endpoint::Initiator(syn) => {
+                Endpoint::Initiator((syn, ..)) => {
                     if ack_num == syn {
                         let recv_buf = ReceiveBuffer::new(seq_num);
                         let sent_packets = SentPackets::new(syn);
@@ -238,16 +245,9 @@ impl<const N: usize> Connection<N> {
                     recv_buf.write(data, seq_num);
                 }
 
-                // TODO: this is ugly, but as things are now, we do not want to clone the entire
-                // receive buffer.
-                let tmp = ReceiveBuffer::new(0);
-                let recv_buf = std::mem::replace(recv_buf, tmp);
-                let tmp = SentPackets::new(0);
-                let sent_packets = std::mem::replace(sent_packets, tmp);
-
                 self.state = State::Closing {
-                    recv_buf,
-                    sent_packets,
+                    recv_buf: recv_buf.clone(),
+                    sent_packets: sent_packets.clone(),
                     remote_fin: Some(seq_num),
                     local_fin: None,
                 };
@@ -280,6 +280,27 @@ impl<const N: usize> Connection<N> {
     fn reset(&mut self, err: Error) {
         self.state = State::Closed { err: Some(err) }
     }
+
+    fn lost_packets(&self) -> Vec<Packet> {
+        let sent_packets = match &self.state {
+            State::Connecting | State::Closed { .. } => None,
+            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
+                Some(sent_packets)
+            }
+        };
+
+        let mut lost = vec![];
+        if let Some(sent_packets) = sent_packets {
+            if !sent_packets.has_lost_packets() {
+                return lost;
+            }
+
+            let now = crate::time::now_micros();
+            for (seq_num, packet_type, payload) in sent_packets.lost_packets() {}
+        }
+
+        lost
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +326,7 @@ mod test {
     #[test]
     fn on_syn_initiator() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator(syn);
+        let endpoint = Endpoint::Initiator((syn, None));
         let mut conn = conn(endpoint);
 
         conn.on_syn(syn);
@@ -348,7 +369,7 @@ mod test {
     #[test]
     fn on_state_connecting_initiator() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator(syn);
+        let endpoint = Endpoint::Initiator((syn, None));
         let mut conn = conn(endpoint);
 
         let seq_num = 1;
@@ -501,7 +522,7 @@ mod test {
     #[test]
     fn on_reset_non_closed() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator(syn);
+        let endpoint = Endpoint::Initiator((syn, None));
         let mut conn = conn(endpoint);
 
         conn.on_reset();
@@ -516,7 +537,7 @@ mod test {
     #[test]
     fn on_reset_closed() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator(syn);
+        let endpoint = Endpoint::Initiator((syn, None));
         let mut conn = conn(endpoint);
 
         conn.state = State::Closed { err: None };

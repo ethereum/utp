@@ -9,6 +9,7 @@ const LOSS_THRESHOLD: usize = 3;
 
 type Bytes = Vec<u8>;
 
+#[derive(Clone, Debug)]
 struct SentPacket {
     pub seq_num: u16,
     pub packet_type: PacketType,
@@ -25,6 +26,7 @@ impl SentPacket {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SentPackets {
     packets: Vec<SentPacket>,
     init_seq_num: u16,
