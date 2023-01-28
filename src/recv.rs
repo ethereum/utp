@@ -7,7 +7,7 @@ type Bytes = Vec<u8>;
 
 #[derive(Clone, Debug)]
 pub struct ReceiveBuffer<const N: usize> {
-    buf: [u8; N],
+    buf: Box<[u8; N]>,
     offset: usize,
     pending: BTreeMap<u16, Bytes>,
     init_seq_num: u16,
@@ -18,7 +18,7 @@ impl<const N: usize> ReceiveBuffer<N> {
     /// Returns a new buffer.
     pub fn new(init_seq_num: u16) -> Self {
         Self {
-            buf: [0; N],
+            buf: Box::new([0; N]),
             offset: 0,
             pending: BTreeMap::new(),
             init_seq_num,
