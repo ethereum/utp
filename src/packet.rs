@@ -554,6 +554,116 @@ impl Packet {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PacketBuilder {
+    packet_type: PacketType,
+    conn_id: u16,
+    ts_micros: u32,
+    ts_diff_micros: u32,
+    window_size: u32,
+    seq_num: u16,
+    ack_num: u16,
+    selective_ack: Option<SelectiveAck>,
+    payload: Option<Vec<u8>>,
+}
+
+impl PacketBuilder {
+    pub fn new(
+        packet_type: PacketType,
+        conn_id: u16,
+        ts_micros: u32,
+        window_size: u32,
+        seq_num: u16,
+    ) -> Self {
+        Self {
+            packet_type,
+            conn_id,
+            ts_micros,
+            ts_diff_micros: 0,
+            window_size,
+            seq_num,
+            ack_num: 0,
+            selective_ack: None,
+            payload: None,
+        }
+    }
+
+    pub fn ts_micros(mut self, ts_micros: u32) -> Self {
+        self.ts_micros = ts_micros;
+        self
+    }
+
+    pub fn ts_diff_micros(mut self, ts_diff_micros: u32) -> Self {
+        self.ts_diff_micros = ts_diff_micros;
+        self
+    }
+
+    pub fn window_size(mut self, window_size: u32) -> Self {
+        self.window_size = window_size;
+        self
+    }
+
+    pub fn ack_num(mut self, ack_num: u16) -> Self {
+        self.ack_num = ack_num;
+        self
+    }
+
+    pub fn selective_ack(mut self, selective_ack: Option<SelectiveAck>) -> Self {
+        self.selective_ack = selective_ack;
+        self
+    }
+
+    pub fn payload(mut self, payload: Vec<u8>) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    pub fn build(self) -> Packet {
+        let extension = match self.selective_ack {
+            Some(..) => Extension::SelectiveAck,
+            None => Extension::None,
+        };
+
+        Packet {
+            header: PacketHeader {
+                packet_type: self.packet_type,
+                version: Version::One,
+                extension,
+                conn_id: self.conn_id,
+                ts_micros: self.ts_micros,
+                ts_diff_micros: self.ts_diff_micros,
+                window_size: self.window_size,
+                seq_num: self.seq_num,
+                ack_num: self.ack_num,
+            },
+            selective_ack: self.selective_ack,
+            payload: self.payload.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<Packet> for PacketBuilder {
+    fn from(packet: Packet) -> Self {
+        let payload = if packet.payload.is_empty() {
+            None
+        } else {
+            Some(packet.payload)
+        };
+
+        Self {
+            packet_type: packet.header.packet_type,
+            conn_id: packet.header.conn_id,
+            ts_micros: packet.header.ts_micros,
+            ts_diff_micros: packet.header.ts_diff_micros,
+            window_size: packet.header.window_size,
+            seq_num: packet.header.seq_num,
+            ack_num: packet.header.ack_num,
+            selective_ack: packet.selective_ack,
+            payload,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
