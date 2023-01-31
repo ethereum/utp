@@ -123,6 +123,8 @@ impl<const N: usize> Connection<N> {
         // If the connection is ready to be closed, then close the connection.
 
         // Send a STATE packet if appropriate packet and connection in appropriate state.
+        //
+        // NOTE: We don't call `transmit` because we do not wish to track this packet.
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
@@ -371,6 +373,7 @@ impl<const N: usize> Connection<N> {
                 let selective_ack = recv_buf.selective_ack();
                 let packet =
                     PacketBuilder::new(PacketType::State, conn_id, now, recv_window, seq_num)
+                        .ts_diff_micros(ts_diff_micros)
                         .ack_num(ack_num)
                         .selective_ack(selective_ack)
                         .build();
