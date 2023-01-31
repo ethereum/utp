@@ -1,8 +1,7 @@
-use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::packet::{Packet, PacketType, SelectiveAck};
+use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::sent::SentPackets;
 
@@ -23,12 +22,8 @@ enum Endpoint {
     Acceptor((u16, u16)),
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PeerState {
-    ts_diff_micros: u32,
-    recv_window: u32,
-}
-
+// TODO: remove clippy allow.
+#[allow(dead_code)]
 #[derive(Clone)]
 enum State<const N: usize> {
     Connecting,
@@ -48,45 +43,51 @@ enum State<const N: usize> {
 }
 
 pub struct Connection<const N: usize> {
-    peer_addr: SocketAddr,
     state: State<N>,
     send_id: u16,
-    recv_id: u16,
     endpoint: Endpoint,
+    peer_ts_diff: Duration,
+    peer_recv_window: u32,
     outgoing: mpsc::Sender<Packet>,
 }
 
 impl<const N: usize> Connection<N> {
-    pub fn new(
-        peer_addr: SocketAddr,
-        send_id: u16,
-        recv_id: u16,
-        syn: Option<Packet>,
-        outgoing: mpsc::Sender<Packet>,
-    ) -> Self {
-        let endpoint = match syn {
+    pub fn new(send_id: u16, syn: Option<Packet>, outgoing: mpsc::Sender<Packet>) -> Self {
+        let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
                 let syn_ack = rand::random();
-                Endpoint::Acceptor((syn.seq_num(), syn_ack))
+                let endpoint = Endpoint::Acceptor((syn.seq_num(), syn_ack));
+
+                let now = crate::time::now_micros();
+                let peer_ts_diff = crate::time::duration_between(syn.ts_micros(), now);
+
+                (endpoint, peer_ts_diff, syn.window_size())
             }
             None => {
                 let syn = rand::random();
-                Endpoint::Initiator((syn, None))
+                let endpoint = Endpoint::Initiator((syn, None));
+                (endpoint, Duration::ZERO, u32::MAX)
             }
         };
 
         Self {
-            peer_addr,
             state: State::Connecting,
             send_id,
-            recv_id,
             endpoint,
+            peer_ts_diff,
+            peer_recv_window,
             outgoing,
         }
     }
 
     pub fn on_packet(&mut self, packet: &Packet, now: Instant) {
-        // Incorporate the info from the remote peer into the state.
+        let now_micros = crate::time::now_micros();
+        self.peer_recv_window = packet.window_size();
+
+        // TODO: We probably ought to cap the diff here. If the clock on the remote machine is
+        // behind the clock on the local machine, then we could end up with large (inaccurate)
+        // diffs.
+        self.peer_ts_diff = crate::time::duration_between(packet.ts_micros(), now_micros);
 
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
@@ -108,14 +109,34 @@ impl<const N: usize> Connection<N> {
                     self.on_fin(packet.seq_num(), Some(packet.payload()));
                 }
             }
-            PacketType::Reset => self.on_reset(),
+            PacketType::Reset => {
+                self.on_reset();
+            }
         }
 
         // If there are any lost packets, then queue retransmissions.
+        let lost_packets = self.lost_packets();
+        for packet in lost_packets {
+            self.transmit(packet, now);
+        }
 
-        // If there is available space in the send window, then notify writeable.
+        // If the connection is ready to be closed, then close the connection.
 
-        // If there is data in the receive buffer, then notify readable.
+        // Send a STATE packet if appropriate packet and connection in appropriate state.
+        match packet.packet_type() {
+            PacketType::Syn | PacketType::Fin | PacketType::Data => {
+                if let Some(state) = self.state_packet() {
+                    self.outgoing
+                        .send(state)
+                        .expect("outgoing channel should be open if connection is not closed");
+                }
+            }
+            PacketType::State | PacketType::Reset => {}
+        };
+
+        // If there is available space in the send window, then notify writer(s).
+
+        // If there is data in the receive buffer, then notify reader(s).
     }
 
     fn on_syn(&mut self, seq_num: u16) {
@@ -220,11 +241,19 @@ impl<const N: usize> Connection<N> {
             // not, then reset the connection.
             State::Closing {
                 recv_buf,
-                remote_fin: _remote_fin,
+                remote_fin,
                 ..
             } => {
-                // TODO: Check validity of sequence number if we have received a FIN. This check
-                // could be done in `on_packet`.
+                if let Some(remote_fin) = remote_fin {
+                    let start = recv_buf.init_seq_num();
+                    let range = crate::seq::CircularRangeInclusive::new(start, *remote_fin);
+                    if !range.contains(seq_num) {
+                        self.state = State::Closed {
+                            err: Some(Error::InvalidSeqNum),
+                        };
+                        return;
+                    }
+                }
 
                 if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
                     recv_buf.write(data, seq_num);
@@ -240,6 +269,7 @@ impl<const N: usize> Connection<N> {
             State::Established {
                 recv_buf,
                 sent_packets,
+                ..
             } => {
                 if let Some(data) = data {
                     recv_buf.write(data, seq_num);
@@ -281,22 +311,111 @@ impl<const N: usize> Connection<N> {
         self.state = State::Closed { err: Some(err) }
     }
 
-    fn lost_packets(&self) -> Vec<Packet> {
-        let sent_packets = match &self.state {
-            State::Connecting | State::Closed { .. } => None,
+    fn transmit(&mut self, packet: Packet, now: Instant) -> bool {
+        let sent_packets = match &mut self.state {
+            State::Connecting | State::Closed { .. } => return false,
             State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
-                Some(sent_packets)
+                sent_packets
             }
         };
 
-        let mut lost = vec![];
-        if let Some(sent_packets) = sent_packets {
-            if !sent_packets.has_lost_packets() {
-                return lost;
-            }
+        let payload = if packet.payload().is_empty() {
+            None
+        } else {
+            Some(packet.payload().clone())
+        };
 
-            let now = crate::time::now_micros();
-            for (seq_num, packet_type, payload) in sent_packets.lost_packets() {}
+        sent_packets.on_transmit(
+            packet.seq_num(),
+            packet.packet_type(),
+            payload,
+            packet.encoded_len() as u32,
+            now,
+        );
+        self.outgoing
+            .send(packet)
+            .expect("outgoing channel should be open if connection is not closed");
+
+        true
+    }
+
+    fn state_packet(&self) -> Option<Packet> {
+        let now = crate::time::now_micros();
+        let conn_id = self.send_id;
+        let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
+
+        match &self.state {
+            State::Connecting => match self.endpoint {
+                Endpoint::Initiator(..) => None,
+                Endpoint::Acceptor((syn, syn_ack)) => {
+                    let packet =
+                        PacketBuilder::new(PacketType::State, conn_id, now, N as u32, syn_ack)
+                            .ts_diff_micros(ts_diff_micros)
+                            .ack_num(syn)
+                            .build();
+                    Some(packet)
+                }
+            },
+            State::Established {
+                recv_buf,
+                sent_packets,
+            }
+            | State::Closing {
+                recv_buf,
+                sent_packets,
+                ..
+            } => {
+                let seq_num = sent_packets.seq_num_range().end();
+                let ack_num = recv_buf.ack_num();
+                let recv_window = recv_buf.available() as u32;
+                let selective_ack = recv_buf.selective_ack();
+                let packet =
+                    PacketBuilder::new(PacketType::State, conn_id, now, recv_window, seq_num)
+                        .ack_num(ack_num)
+                        .selective_ack(selective_ack)
+                        .build();
+                Some(packet)
+            }
+            State::Closed { .. } => None,
+        }
+    }
+
+    fn lost_packets(&self) -> Vec<Packet> {
+        let (sent_packets, recv_buf) = match &self.state {
+            State::Connecting | State::Closed { .. } => return vec![],
+            State::Established {
+                sent_packets,
+                recv_buf,
+                ..
+            }
+            | State::Closing {
+                sent_packets,
+                recv_buf,
+                ..
+            } => (sent_packets, recv_buf),
+        };
+
+        let mut lost = vec![];
+        if !sent_packets.has_lost_packets() {
+            return lost;
+        }
+
+        let conn_id = self.send_id;
+        let now = crate::time::now_micros();
+        let recv_window = recv_buf.available() as u32;
+        let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
+        for (seq_num, packet_type, payload) in sent_packets.lost_packets() {
+            let mut packet = PacketBuilder::new(packet_type, conn_id, now, recv_window, seq_num);
+            if let Some(payload) = payload {
+                packet = packet.payload(payload);
+            }
+            let packet = packet
+                .ts_diff_micros(ts_diff_micros)
+                .ack_num(recv_buf.ack_num())
+                .selective_ack(recv_buf.selective_ack())
+                .build();
+
+            lost.push(packet);
         }
 
         lost
@@ -314,11 +433,11 @@ mod test {
         let (outgoing, _) = mpsc::channel();
 
         Connection {
-            peer_addr: SocketAddr::from(([1, 0, 0, 127], 3000)),
             state: State::Connecting,
             send_id: 100,
-            recv_id: 101,
             endpoint,
+            peer_ts_diff: Duration::from_millis(100),
+            peer_recv_window: u32::MAX,
             outgoing,
         }
     }
@@ -453,14 +572,17 @@ mod test {
 
         let fin = syn.wrapping_add(3);
         conn.on_fin(fin, None);
-        assert!(std::matches!(
-            conn.state,
+        match conn.state {
             State::Closing {
-                local_fin: None,
-                remote_fin: Some(fin),
+                local_fin,
+                remote_fin,
                 ..
+            } => {
+                assert!(local_fin.is_none());
+                assert_eq!(remote_fin, Some(fin));
             }
-        ));
+            _ => panic!("connection should be closing"),
+        }
     }
 
     #[test]
@@ -482,14 +604,17 @@ mod test {
 
         let remote_fin = syn.wrapping_add(3);
         conn.on_fin(remote_fin, None);
-        assert!(std::matches!(
-            conn.state,
+        match conn.state {
             State::Closing {
-                local_fin: Some(local_fin),
-                remote_fin: Some(remote_fin),
+                local_fin: local,
+                remote_fin: remote,
                 ..
+            } => {
+                assert_eq!(local, Some(local_fin));
+                assert_eq!(remote, Some(remote_fin));
             }
-        ));
+            _ => panic!("connection should be closing"),
+        }
     }
 
     #[test]

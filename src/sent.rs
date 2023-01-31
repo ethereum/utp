@@ -75,6 +75,10 @@ impl SentPackets {
         self.congestion_ctrl.bytes_available_in_window()
     }
 
+    pub fn has_unacked_packets(&self) -> bool {
+        self.first_unacked_seq_num().is_some()
+    }
+
     pub fn has_lost_packets(&self) -> bool {
         !self.lost_packets.is_empty()
     }
