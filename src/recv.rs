@@ -31,6 +31,11 @@ impl<const N: usize> ReceiveBuffer<N> {
         N - self.offset - self.pending.values().fold(0, |acc, data| acc + data.len())
     }
 
+    /// Returns the initial sequence number of the buffer.
+    pub fn init_seq_num(&self) -> u16 {
+        self.init_seq_num
+    }
+
     /// Returns `true` if data was already written into the buffer for `seq_num`.
     pub fn was_written(&self, seq_num: u16) -> bool {
         let range = CircularRangeInclusive::new(

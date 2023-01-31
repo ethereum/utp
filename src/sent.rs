@@ -9,6 +9,7 @@ const LOSS_THRESHOLD: usize = 3;
 
 type Bytes = Vec<u8>;
 
+#[derive(Clone, Debug)]
 struct SentPacket {
     pub seq_num: u16,
     pub packet_type: PacketType,
@@ -25,6 +26,7 @@ impl SentPacket {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SentPackets {
     packets: Vec<SentPacket>,
     init_seq_num: u16,
@@ -71,6 +73,10 @@ impl SentPackets {
 
     pub fn window(&self) -> u32 {
         self.congestion_ctrl.bytes_available_in_window()
+    }
+
+    pub fn has_unacked_packets(&self) -> bool {
+        self.first_unacked_seq_num().is_some()
     }
 
     pub fn has_lost_packets(&self) -> bool {
