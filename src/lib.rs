@@ -5,4 +5,6 @@ pub mod recv;
 pub mod send;
 pub mod sent;
 pub mod seq;
+pub mod socket;
+pub mod stream;
 pub mod time;

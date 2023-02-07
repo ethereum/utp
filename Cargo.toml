@@ -6,7 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+delay_map = "0.1.2"
+futures = "0.3.26"
 rand = "0.8.5"
+tokio = { version = "1.25.0", features = ["io-util", "rt-multi-thread", "macros", "net", "sync", "time"] }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

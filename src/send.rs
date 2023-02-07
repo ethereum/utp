@@ -3,6 +3,7 @@ use std::io;
 
 type Bytes = Vec<u8>;
 
+#[derive(Clone, Debug)]
 pub struct SendBuffer<const N: usize> {
     pending: VecDeque<Bytes>,
     offset: usize,
@@ -24,6 +25,11 @@ impl<const N: usize> SendBuffer<N> {
             pending: VecDeque::new(),
             offset: 0,
         }
+    }
+
+    /// Returns `true` if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
     }
 
     /// Returns the number of bytes available in the buffer.
