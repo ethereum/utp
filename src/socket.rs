@@ -12,6 +12,8 @@ use crate::stream::UtpStream;
 type ConnKey = (SocketAddr, u16);
 type ConnChannel = mpsc::UnboundedSender<Packet>;
 
+const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
+
 pub struct UtpSocket {
     conns: Arc<RwLock<HashMap<ConnKey, ConnChannel>>>,
     accepts: mpsc::UnboundedSender<oneshot::Sender<io::Result<UtpStream>>>,
@@ -37,7 +39,7 @@ impl UtpSocket {
         };
 
         tokio::spawn(async move {
-            let mut buf = [0; u16::MAX as usize];
+            let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
                 tokio::select! {
                     Ok((n, src)) = udp.recv_from(&mut buf) => {
