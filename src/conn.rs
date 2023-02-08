@@ -1,6 +1,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::cid::ConnectionId;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::sent::SentPackets;
@@ -44,7 +45,7 @@ enum State<const N: usize> {
 
 pub struct Connection<const N: usize> {
     state: State<N>,
-    send_id: u16,
+    cid: ConnectionId,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
@@ -52,7 +53,7 @@ pub struct Connection<const N: usize> {
 }
 
 impl<const N: usize> Connection<N> {
-    pub fn new(send_id: u16, syn: Option<Packet>, outgoing: mpsc::Sender<Packet>) -> Self {
+    pub fn new(cid: ConnectionId, syn: Option<Packet>, outgoing: mpsc::Sender<Packet>) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
                 let syn_ack = rand::random();
@@ -72,7 +73,7 @@ impl<const N: usize> Connection<N> {
 
         Self {
             state: State::Connecting,
-            send_id,
+            cid,
             endpoint,
             peer_ts_diff,
             peer_recv_window,
@@ -343,7 +344,7 @@ impl<const N: usize> Connection<N> {
 
     fn state_packet(&self) -> Option<Packet> {
         let now = crate::time::now_micros();
-        let conn_id = self.send_id;
+        let conn_id = self.cid.send;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
 
         match &self.state {
@@ -403,7 +404,7 @@ impl<const N: usize> Connection<N> {
             return lost;
         }
 
-        let conn_id = self.send_id;
+        let conn_id = self.cid.send;
         let now = crate::time::now_micros();
         let recv_window = recv_buf.available() as u32;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
@@ -429,15 +430,24 @@ impl<const N: usize> Connection<N> {
 mod test {
     use super::*;
 
+    use std::net::SocketAddr;
+
     const BUF: usize = 2048;
     const DELAY: Duration = Duration::from_millis(100);
 
     fn conn(endpoint: Endpoint) -> Connection<BUF> {
         let (outgoing, _) = mpsc::channel();
 
+        let peer = SocketAddr::from(([127, 0, 0, 1], 3400));
+        let cid = ConnectionId {
+            send: 101,
+            recv: 100,
+            peer,
+        };
+
         Connection {
             state: State::Connecting,
-            send_id: 100,
+            cid,
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,
