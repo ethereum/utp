@@ -3,13 +3,14 @@ use std::net::SocketAddr;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cid::ConnectionId;
 use crate::conn;
 use crate::packet::Packet;
 
 const N: usize = u16::MAX as usize;
 
 pub struct UtpStream {
-    peer_addr: SocketAddr,
+    cid: ConnectionId,
     reads: mpsc::UnboundedSender<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -17,14 +18,13 @@ pub struct UtpStream {
 
 impl UtpStream {
     pub(crate) fn new(
-        peer_addr: SocketAddr,
-        send_id: u16,
+        cid: ConnectionId,
         syn: Option<Packet>,
         outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
         incoming: mpsc::UnboundedReceiver<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
-        let mut conn = conn::Connection::<N>::new(peer_addr, send_id, syn, connected, outgoing);
+        let mut conn = conn::Connection::<N>::new(cid, syn, connected, outgoing);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
@@ -35,7 +35,7 @@ impl UtpStream {
         });
 
         Self {
-            peer_addr,
+            cid,
             reads: reads_tx,
             writes: writes_tx,
             shutdown: Some(shutdown_tx),
@@ -43,7 +43,7 @@ impl UtpStream {
     }
 
     pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
+        self.cid.peer
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {

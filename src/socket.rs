@@ -1,21 +1,22 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cid::{ConnectionId, ConnectionIdGenerator, StdConnectionIdGenerator};
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
 
-type ConnKey = (SocketAddr, u16);
 type ConnChannel = mpsc::UnboundedSender<Packet>;
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
 pub struct UtpSocket {
-    conns: Arc<RwLock<HashMap<ConnKey, ConnChannel>>>,
+    conns: Arc<RwLock<HashMap<ConnectionId, ConnChannel>>>,
+    cid_gen: Mutex<StdConnectionIdGenerator>,
     accepts: mpsc::UnboundedSender<oneshot::Sender<io::Result<UtpStream>>>,
     outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
 }
@@ -27,6 +28,8 @@ impl UtpSocket {
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
+        let cid_gen = Mutex::new(StdConnectionIdGenerator::default());
+
         let mut incoming_conns = VecDeque::new();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
@@ -34,6 +37,7 @@ impl UtpSocket {
 
         let socket = Self {
             conns: Arc::clone(&conns),
+            cid_gen,
             accepts: accepts_tx,
             outgoing: outgoing_tx.clone(),
         };
@@ -49,19 +53,30 @@ impl UtpSocket {
                                 continue;
                             }
                         };
-                        let conn_id = match packet.packet_type() {
-                            PacketType::Syn => packet.conn_id(),
+                        let (acc_send, acc_recv) = match packet.packet_type() {
+                            PacketType::Syn => (packet.conn_id(), packet.conn_id().wrapping_add(1)),
                             PacketType::State
                             | PacketType::Data
                             | PacketType::Fin
-                            | PacketType::Reset => packet.conn_id().wrapping_sub(1),
+                            | PacketType::Reset => (packet.conn_id().wrapping_sub(1), packet.conn_id()),
                         };
-                        let alt_conn_id = conn_id.wrapping_add(1);
+                        let acc_cid = ConnectionId {
+                            send: acc_send,
+                            recv: acc_recv,
+                            peer: src,
+                        };
+
+                        let (init_send, init_recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
+                        let init_cid = ConnectionId {
+                            send: init_send,
+                            recv: init_recv,
+                            peer: src,
+                        };
 
                         let conns = conns.write().unwrap();
                         let conn = conns
-                            .get(&(src, conn_id))
-                            .or_else(|| conns.get(&(src, alt_conn_id)));
+                            .get(&acc_cid)
+                            .or_else(|| conns.get(&init_cid));
                         match conn {
                             Some(conn) => {
                                 let _ = conn.send(packet);
@@ -85,7 +100,11 @@ impl UtpSocket {
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (syn, src) = incoming_conns.pop_front().unwrap();
 
-                        let conn_id = syn.conn_id().wrapping_add(1);
+                        let cid = ConnectionId {
+                            send: syn.conn_id(),
+                            recv: syn.conn_id().wrapping_add(1),
+                            peer: src,
+                        };
                         let (connected_tx, connected_rx) = oneshot::channel();
                         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 
@@ -93,12 +112,11 @@ impl UtpSocket {
                             conns
                                 .write()
                                 .unwrap()
-                                .insert((src, conn_id), incoming_tx);
+                                .insert(cid, incoming_tx);
                         }
 
                         let stream = UtpStream::new(
-                            src,
-                            conn_id,
+                            cid,
                             Some(syn),
                             outgoing_tx.clone(),
                             incoming_rx,
@@ -136,29 +154,15 @@ impl UtpSocket {
     }
 
     pub async fn connect(&self, addr: SocketAddr) -> io::Result<UtpStream> {
-        let mut conn_id: u16 = rand::random();
-        while self.conns.read().unwrap().contains_key(&(addr, conn_id)) {
-            conn_id = rand::random();
-        }
-
+        let cid = self.cid_gen.lock().unwrap().cid(addr);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 
         {
-            self.conns
-                .write()
-                .unwrap()
-                .insert((addr, conn_id), incoming_tx);
+            self.conns.write().unwrap().insert(cid, incoming_tx);
         }
 
-        let stream = UtpStream::new(
-            addr,
-            conn_id,
-            None,
-            self.outgoing.clone(),
-            incoming_rx,
-            connected_tx,
-        );
+        let stream = UtpStream::new(cid, None, self.outgoing.clone(), incoming_rx, connected_tx);
 
         match connected_rx.await {
             Ok(..) => Ok(stream),

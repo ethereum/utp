@@ -9,6 +9,7 @@ use delay_map::HashMapDelay;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
+use crate::cid::ConnectionId;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
@@ -114,8 +115,7 @@ const INITIAL_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Connection<const N: usize> {
     state: State<N>,
-    peer_addr: SocketAddr,
-    send_id: u16,
+    cid: ConnectionId,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
@@ -129,8 +129,7 @@ pub struct Connection<const N: usize> {
 
 impl<const N: usize> Connection<N> {
     pub fn new(
-        peer_addr: SocketAddr,
-        send_id: u16,
+        cid: ConnectionId,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
@@ -154,8 +153,7 @@ impl<const N: usize> Connection<N> {
 
         Self {
             state: State::Connecting(Some(connected)),
-            peer_addr,
-            send_id,
+            cid,
             endpoint,
             peer_ts_diff,
             peer_recv_window,
@@ -185,21 +183,21 @@ impl<const N: usize> Connection<N> {
 
                 let syn = PacketBuilder::new(
                     PacketType::Syn,
-                    self.send_id.wrapping_sub(1),
+                    self.cid.recv,
                     now_micros,
                     recv_window,
                     syn_seq_num,
                 )
                 .build();
 
-                self.outgoing.send((syn, self.peer_addr)).expect("");
+                self.outgoing.send((syn, self.cid.peer)).expect("");
 
                 self.endpoint = Endpoint::Initiator((syn_seq_num, Some(now)));
             }
             Endpoint::Acceptor((syn, syn_ack)) => {
                 let state = PacketBuilder::new(
                     PacketType::State,
-                    self.send_id,
+                    self.cid.send,
                     now_micros,
                     recv_window,
                     syn_ack,
@@ -207,7 +205,7 @@ impl<const N: usize> Connection<N> {
                 .ack_num(syn)
                 .ts_diff_micros(self.peer_ts_diff.as_micros() as u32)
                 .build();
-                self.outgoing.send((state, self.peer_addr)).expect("");
+                self.outgoing.send((state, self.cid.peer)).expect("");
             }
         }
 
@@ -267,7 +265,7 @@ impl<const N: usize> Connection<N> {
                     let selective_ack = recv_buf.selective_ack();
                     let fin = PacketBuilder::new(
                         PacketType::Fin,
-                        self.send_id,
+                        self.cid.send,
                         crate::time::now_micros(),
                         recv_window,
                         seq_num,
@@ -277,7 +275,7 @@ impl<const N: usize> Connection<N> {
                     .build();
 
                     local_fin = Some(seq_num);
-                    let _ = self.outgoing.send((fin, self.peer_addr));
+                    let _ = self.outgoing.send((fin, self.cid.peer));
                 }
 
                 self.state = State::Closing {
@@ -302,7 +300,7 @@ impl<const N: usize> Connection<N> {
                     let selective_ack = recv_buf.selective_ack();
                     let fin = PacketBuilder::new(
                         PacketType::Fin,
-                        self.send_id,
+                        self.cid.send,
                         crate::time::now_micros(),
                         recv_window,
                         seq_num,
@@ -312,7 +310,7 @@ impl<const N: usize> Connection<N> {
                     .build();
 
                     *local_fin = Some(seq_num);
-                    let _ = self.outgoing.send((fin, self.peer_addr));
+                    let _ = self.outgoing.send((fin, self.cid.peer));
                 }
             }
             State::Closed { .. } => {}
@@ -361,7 +359,7 @@ impl<const N: usize> Connection<N> {
 
             let packet = PacketBuilder::new(
                 PacketType::Data,
-                self.send_id,
+                self.cid.send,
                 now_micros,
                 recv_buf.available() as u32,
                 sent_packets.next_seq_num(),
@@ -592,7 +590,7 @@ impl<const N: usize> Connection<N> {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
                     self.outgoing
-                        .send((state, self.peer_addr))
+                        .send((state, self.cid.peer))
                         .expect("outgoing channel should be open if connection is not closed");
                 }
             }
@@ -834,7 +832,7 @@ impl<const N: usize> Connection<N> {
         self.unacked
             .insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
         self.outgoing
-            .send((packet, self.peer_addr))
+            .send((packet, self.cid.peer))
             .expect("outgoing channel should be open if connection is not closed");
 
         true
@@ -842,7 +840,7 @@ impl<const N: usize> Connection<N> {
 
     fn state_packet(&self) -> Option<Packet> {
         let now = crate::time::now_micros();
-        let conn_id = self.send_id;
+        let conn_id = self.cid.send;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
 
         match &self.state {
@@ -903,7 +901,7 @@ impl<const N: usize> Connection<N> {
             return lost;
         }
 
-        let conn_id = self.send_id;
+        let conn_id = self.cid.send;
         let now = crate::time::now_micros();
         let recv_window = recv_buf.available() as u32;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
@@ -929,18 +927,25 @@ impl<const N: usize> Connection<N> {
 mod test {
     use super::*;
 
+    use std::net::SocketAddr;
+
     const BUF: usize = 2048;
     const DELAY: Duration = Duration::from_millis(100);
 
     fn conn(endpoint: Endpoint) -> Connection<BUF> {
-        let peer_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
         let (connected, _) = oneshot::channel();
         let (outgoing, _) = mpsc::unbounded_channel();
 
+        let peer = SocketAddr::from(([127, 0, 0, 1], 3400));
+        let cid = ConnectionId {
+            send: 101,
+            recv: 100,
+            peer,
+        };
+
         Connection {
             state: State::Connecting(Some(connected)),
-            peer_addr,
-            send_id: 100,
+            cid,
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,
