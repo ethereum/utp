@@ -7,10 +7,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, StdConnectionIdGenerator};
+use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
 
-type ConnChannel = mpsc::UnboundedSender<Packet>;
+type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
@@ -53,42 +54,21 @@ impl UtpSocket {
                                 continue;
                             }
                         };
-                        let (acc_send, acc_recv) = match packet.packet_type() {
-                            PacketType::Syn => (packet.conn_id(), packet.conn_id().wrapping_add(1)),
-                            PacketType::State
-                            | PacketType::Data
-                            | PacketType::Fin
-                            | PacketType::Reset => (packet.conn_id().wrapping_sub(1), packet.conn_id()),
-                        };
-                        let acc_cid = ConnectionId {
-                            send: acc_send,
-                            recv: acc_recv,
-                            peer: src,
-                        };
 
-                        let (init_send, init_recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
-                        let init_cid = ConnectionId {
-                            send: init_send,
-                            recv: init_recv,
-                            peer: src,
-                        };
-
+                        let init_cid = cid_from_packet(&packet, src, true);
+                        let acc_cid = cid_from_packet(&packet, src, false);
                         let conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
                             .or_else(|| conns.get(&init_cid));
                         match conn {
                             Some(conn) => {
-                                let _ = conn.send(packet);
+                                let _ = conn.send(StreamEvent::Incoming(packet));
                             }
-                            None => match packet.packet_type() {
-                                PacketType::Syn => {
+                            None => {
+                                if std::matches!(packet.packet_type(), PacketType::Syn) {
                                     incoming_conns.push_back((packet, src));
                                 }
-                                PacketType::State
-                                | PacketType::Data
-                                | PacketType::Fin
-                                | PacketType::Reset => {}
                             },
                         }
                         std::mem::drop(conns);
@@ -100,11 +80,7 @@ impl UtpSocket {
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (syn, src) = incoming_conns.pop_front().unwrap();
 
-                        let cid = ConnectionId {
-                            send: syn.conn_id(),
-                            recv: syn.conn_id().wrapping_add(1),
-                            peer: src,
-                        };
+                        let cid = cid_from_packet(&syn, src, false);
                         let (connected_tx, connected_rx) = oneshot::channel();
                         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 
@@ -125,12 +101,14 @@ impl UtpSocket {
 
                         tokio::spawn(async move {
                             match connected_rx.await {
-                                Ok(..) => {
+                                Ok(Ok(..)) => {
                                     let _ = accept.send(Ok(stream));
                                 }
+                                Ok(Err(err)) => {
+                                    let _ = accept.send(Err(err));
+                                }
                                 Err(..) => {
-                                    let err = Err(io::Error::from(io::ErrorKind::TimedOut));
-                                    let _ = accept.send(err);
+                                    let _ = accept.send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
                                 }
                             }
                         });
@@ -171,6 +149,33 @@ impl UtpSocket {
     }
 }
 
+fn cid_from_packet(packet: &Packet, src: SocketAddr, local_initiator: bool) -> ConnectionId {
+    if local_initiator {
+        let (send, recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
+        ConnectionId {
+            send,
+            recv,
+            peer: src,
+        }
+    } else {
+        let (send, recv) = match packet.packet_type() {
+            PacketType::Syn => (packet.conn_id(), packet.conn_id().wrapping_add(1)),
+            PacketType::State | PacketType::Data | PacketType::Fin | PacketType::Reset => {
+                (packet.conn_id().wrapping_sub(1), packet.conn_id())
+            }
+        };
+        ConnectionId {
+            send,
+            recv,
+            peer: src,
+        }
+    }
+}
+
 impl Drop for UtpSocket {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        for conn in self.conns.read().unwrap().values() {
+            let _ = conn.send(StreamEvent::Shutdown);
+        }
+    }
 }

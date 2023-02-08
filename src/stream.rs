@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::ConnectionId;
 use crate::conn;
+use crate::event::StreamEvent;
 use crate::packet::Packet;
 
 const N: usize = u16::MAX as usize;
@@ -21,7 +22,7 @@ impl UtpStream {
         cid: ConnectionId,
         syn: Option<Packet>,
         outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
-        incoming: mpsc::UnboundedReceiver<Packet>,
+        events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
         let mut conn = conn::Connection::<N>::new(cid, syn, connected, outgoing);
@@ -30,7 +31,7 @@ impl UtpStream {
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            conn.event_loop(incoming, writes_rx, reads_rx, shutdown_rx)
+            conn.event_loop(events, writes_rx, reads_rx, shutdown_rx)
                 .await
         });
 

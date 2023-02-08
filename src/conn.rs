@@ -1,6 +1,5 @@
 use std::cmp;
 use std::collections::VecDeque;
-use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -10,6 +9,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::cid::ConnectionId;
+use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
@@ -43,23 +43,6 @@ enum Endpoint {
     Acceptor((u16, u16)),
 }
 
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Endpoint::Initiator((syn, init)) => {
-                let init = match init {
-                    Some(..) => "init",
-                    None => "uninit",
-                };
-                write!(f, "Initiator (local-syn: {syn}, {init})")
-            }
-            Endpoint::Acceptor((syn, syn_ack)) => {
-                write!(f, "Acceptor (remote-syn: {syn}, local-syn: {syn_ack})")
-            }
-        }
-    }
-}
-
 enum State<const N: usize> {
     Connecting(Option<oneshot::Sender<io::Result<()>>>),
     Established {
@@ -79,39 +62,10 @@ enum State<const N: usize> {
     },
 }
 
-impl<const N: usize> fmt::Display for State<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            State::Connecting(..) => write!(f, "Connecting"),
-            State::Established { .. } => write!(f, "Established"),
-            State::Closing {
-                local_fin,
-                remote_fin,
-                ..
-            } => {
-                let local = match local_fin {
-                    Some(fin) => format!("{fin}"),
-                    None => String::from("N/A"),
-                };
-                let remote = match remote_fin {
-                    Some(fin) => format!("{fin}"),
-                    None => String::from("N/A"),
-                };
-                write!(f, "Closing (local-fin: {local}, remote-fin: {remote})")
-            }
-
-            State::Closed { err } => match err {
-                Some(err) => write!(f, "Closed (error: {err:?})"),
-                None => write!(f, "Closed"),
-            },
-        }
-    }
-}
-
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
-const INITIAL_TIMEOUT: Duration = Duration::from_millis(500);
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Connection<const N: usize> {
     state: State<N>,
@@ -158,7 +112,7 @@ impl<const N: usize> Connection<N> {
             peer_ts_diff,
             peer_recv_window,
             outgoing,
-            unacked: HashMapDelay::new(INITIAL_TIMEOUT),
+            unacked: HashMapDelay::new(DEFAULT_TIMEOUT),
             pending_reads: VecDeque::new(),
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
@@ -168,52 +122,38 @@ impl<const N: usize> Connection<N> {
 
     pub async fn event_loop(
         &mut self,
-        mut incoming: mpsc::UnboundedReceiver<Packet>,
+        mut events: mpsc::UnboundedReceiver<StreamEvent>,
         mut writes: mpsc::UnboundedReceiver<Write>,
         mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
     ) {
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.
-        let now_micros = crate::time::now_micros();
-        let recv_window = N as u32;
         match self.endpoint {
             Endpoint::Initiator((syn_seq_num, ..)) => {
                 let now = Instant::now();
 
-                let syn = PacketBuilder::new(
-                    PacketType::Syn,
-                    self.cid.recv,
-                    now_micros,
-                    recv_window,
-                    syn_seq_num,
-                )
-                .build();
-
-                self.outgoing.send((syn, self.cid.peer)).expect("");
+                let syn = self.syn_packet(syn_seq_num);
+                self.outgoing.send((syn, self.cid.peer)).unwrap();
 
                 self.endpoint = Endpoint::Initiator((syn_seq_num, Some(now)));
             }
-            Endpoint::Acceptor((syn, syn_ack)) => {
-                let state = PacketBuilder::new(
-                    PacketType::State,
-                    self.cid.send,
-                    now_micros,
-                    recv_window,
-                    syn_ack,
-                )
-                .ack_num(syn)
-                .ts_diff_micros(self.peer_ts_diff.as_micros() as u32)
-                .build();
-                self.outgoing.send((state, self.cid.peer)).expect("");
+            Endpoint::Acceptor(..) => {
+                let state = self.state_packet().unwrap();
+                self.outgoing.send((state, self.cid.peer)).unwrap();
             }
         }
 
         let mut shutting_down = false;
         loop {
             tokio::select! {
-                Some(packet) = incoming.recv() => {
-                    self.on_packet(&packet, Instant::now());
+                Some(event) = events.recv() => {
+                    match event {
+                        StreamEvent::Incoming(packet) => self.on_packet(&packet, Instant::now()),
+                        StreamEvent::Shutdown => {
+                            shutting_down = true;
+                        }
+                    }
                 }
                 Some(Ok(timeout)) = self.unacked.next() => {
                     let (.., packet) = timeout;
@@ -233,7 +173,6 @@ impl<const N: usize> Connection<N> {
                 }
                 _ = &mut shutdown, if !shutting_down => {
                     shutting_down = true;
-                    self.shutdown();
                 }
             }
 
@@ -597,12 +536,14 @@ impl<const N: usize> Connection<N> {
             PacketType::State | PacketType::Reset => {}
         };
 
-        // If there is available space in the send window, then notify writer(s).
+        // If the packet is a STATE packet, then notify writable because the send window may have
+        // increased.
         if std::matches!(packet.packet_type(), PacketType::State) {
             self.writable.notify_one();
         }
 
-        // If there is data in the receive buffer, then notify reader(s).
+        // If the packet contains a data payload, then notify readable because there may be new
+        // data available in the receive buffer.
         if !packet.payload().is_empty() {
             self.readable.notify_one();
         }
@@ -836,6 +777,18 @@ impl<const N: usize> Connection<N> {
             .expect("outgoing channel should be open if connection is not closed");
 
         true
+    }
+
+    fn syn_packet(&self, seq_num: u16) -> Packet {
+        let now_micros = crate::time::now_micros();
+        PacketBuilder::new(
+            PacketType::Syn,
+            self.cid.recv,
+            now_micros,
+            N as u32,
+            seq_num,
+        )
+        .build()
     }
 
     fn state_packet(&self) -> Option<Packet> {
