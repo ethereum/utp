@@ -2,6 +2,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::cid::ConnectionId;
+use crate::congestion;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::sent::SentPackets;
@@ -178,7 +179,9 @@ impl<const N: usize> Connection<N> {
                 Endpoint::Initiator((syn, ..)) => {
                     if ack_num == syn {
                         let recv_buf = ReceiveBuffer::new(seq_num);
-                        let sent_packets = SentPackets::new(syn);
+                        let congestion_ctrl =
+                            congestion::Controller::new(congestion::Config::default());
+                        let sent_packets = SentPackets::new(syn, congestion_ctrl);
                         self.state = State::Established {
                             recv_buf,
                             sent_packets,
@@ -215,7 +218,9 @@ impl<const N: usize> Connection<N> {
                         let mut recv_buf = ReceiveBuffer::new(syn);
                         recv_buf.write(data, seq_num);
 
-                        let sent_packets = SentPackets::new(syn_ack);
+                        let congestion_ctrl =
+                            congestion::Controller::new(congestion::Config::default());
+                        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
 
                         self.state = State::Established {
                             recv_buf,
@@ -518,7 +523,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let mut sent_packets = SentPackets::new(syn_ack);
+        let congestion_ctrl = congestion::Controller::new(congestion::Config::default());
+        let mut sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
 
         let data = vec![0xef];
         let len = 64;
@@ -576,7 +582,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_ctrl = congestion::Controller::new(congestion::Config::default());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
         conn.state = State::Established {
             sent_packets,
@@ -605,7 +612,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_ctrl = congestion::Controller::new(congestion::Config::default());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
         let local_fin = syn_ack.wrapping_add(3);
         conn.state = State::Closing {
@@ -637,7 +645,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_ctrl = congestion::Controller::new(congestion::Config::default());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
         let fin = syn.wrapping_add(3);
         conn.state = State::Closing {
