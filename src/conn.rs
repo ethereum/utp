@@ -402,7 +402,7 @@ impl<const N: usize> Connection<N> {
         outgoing: &mut mpsc::Sender<Packet>,
         packet: Packet,
         now: Instant,
-    ) -> bool {
+    ) {
         let payload = if packet.payload().is_empty() {
             None
         } else {
@@ -419,8 +419,6 @@ impl<const N: usize> Connection<N> {
         outgoing
             .send(packet)
             .expect("outgoing channel should be open if connection is not closed");
-
-        true
     }
 }
 
