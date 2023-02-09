@@ -33,7 +33,6 @@ pub struct Ack {
 pub enum Error {
     InsufficientWindowSize,
     UnknownSeqNum,
-    DuplicateAck,
     DuplicateTransmission,
 }
 
@@ -157,11 +156,10 @@ impl Controller {
             .get_mut(&seq_num)
             .ok_or(Error::UnknownSeqNum)?;
 
-        // Mark the packet acknowledged. To acknowledge a previously acknowledged packet is an
-        // error.
-        // TODO: Handle multiple acknowledgements.
+        // Mark the packet acknowledged. If the packet was already acknowledged, then short-circuit
+        // return. There are no newly acknowledged bytes.
         if packet.acked {
-            return Err(Error::DuplicateAck);
+            return Ok(());
         }
         packet.acked = true;
 
@@ -585,34 +583,6 @@ mod tests {
             };
             let result = ctrl.on_ack(seq_num, ack);
             assert_eq!(result, Err(Error::UnknownSeqNum));
-        }
-
-        #[test]
-        fn on_ack_duplicate_ack() {
-            let mut ctrl = Controller::new(Config::default());
-
-            // Register the initial transmission of a packet with sequence number 1.
-            let seq_num = 1;
-            let bytes = 32;
-            let transmission = Transmit::Initial { bytes };
-            ctrl.on_transmit(seq_num, transmission)
-                .expect("transmission registration failed");
-
-            // Register the acknowledgement for the packet with sequence number 1.
-            let ack_delay = Duration::from_millis(150);
-            let ack_rtt = Duration::from_millis(300);
-            let ack_received_at = Instant::now();
-            let ack = Ack {
-                delay: ack_delay,
-                rtt: ack_rtt,
-                received_at: ack_received_at,
-            };
-            ctrl.on_ack(seq_num, ack.clone())
-                .expect("ack registration failed");
-
-            // Register the acknowledgement for the packet with sequence number 1 AGAIN.
-            let result = ctrl.on_ack(seq_num, ack);
-            assert_eq!(result, Err(Error::DuplicateAck));
         }
 
         #[test]
