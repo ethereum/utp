@@ -9,6 +9,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::cid::ConnectionId;
+use crate::congestion;
 use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
@@ -65,11 +66,34 @@ enum State<const N: usize> {
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectionConfig {
+    pub max_packet_size: u16,
+    pub initial_timeout: Duration,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            max_packet_size: 2048,
+            initial_timeout: Duration::from_millis(500),
+        }
+    }
+}
+
+impl From<ConnectionConfig> for congestion::Config {
+    fn from(value: ConnectionConfig) -> Self {
+        Self {
+            max_packet_size_bytes: u32::from(value.max_packet_size),
+            ..Default::default()
+        }
+    }
+}
 
 pub struct Connection<const N: usize> {
     state: State<N>,
     cid: ConnectionId,
+    config: ConnectionConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
@@ -84,6 +108,7 @@ pub struct Connection<const N: usize> {
 impl<const N: usize> Connection<N> {
     pub fn new(
         cid: ConnectionId,
+        config: ConnectionConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
@@ -108,11 +133,12 @@ impl<const N: usize> Connection<N> {
         Self {
             state: State::Connecting(Some(connected)),
             cid,
+            config,
             endpoint,
             peer_ts_diff,
             peer_recv_window,
             outgoing,
-            unacked: HashMapDelay::new(DEFAULT_TIMEOUT),
+            unacked: HashMapDelay::new(config.initial_timeout),
             pending_reads: VecDeque::new(),
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
@@ -287,28 +313,17 @@ impl<const N: usize> Connection<N> {
         // Compose as many data packets as possible, consuming data from the send buffer.
         let now_micros = crate::time::now_micros();
         let mut window = cmp::min(sent_packets.window(), self.peer_recv_window) as usize;
-        let mut transmits = Vec::new();
+        let mut payloads = Vec::new();
         while window > 0 {
-            let mut data = vec![0; window];
+            let max_packet_size = cmp::min(window, usize::from(self.config.max_packet_size - 64));
+            let mut data = vec![0; max_packet_size];
             let n = send_buf.read(&mut data).unwrap();
+            println!("window: {window} and max packet size: {max_packet_size} and n: {n}");
             if n == 0 {
                 break;
             }
             data.truncate(n);
-
-            let packet = PacketBuilder::new(
-                PacketType::Data,
-                self.cid.send,
-                now_micros,
-                recv_buf.available() as u32,
-                sent_packets.next_seq_num(),
-            )
-            .payload(data)
-            .ts_diff_micros(self.peer_ts_diff.as_micros() as u32)
-            .ack_num(recv_buf.ack_num())
-            .selective_ack(recv_buf.selective_ack())
-            .build();
-            transmits.push(packet);
+            payloads.push(data);
 
             window -= n;
         }
@@ -319,14 +334,37 @@ impl<const N: usize> Connection<N> {
                 let (data, tx) = self.pending_writes.pop_front().unwrap();
                 send_buf.write(&data).unwrap();
                 let _ = tx.send(Ok(data.len()));
+                self.writable.notify_one();
             } else {
                 break;
             }
         }
 
         // Transmit data packets.
-        for packet in transmits.into_iter() {
+        let mut seq_num = sent_packets.next_seq_num();
+        let recv_window = recv_buf.available() as u32;
+        let ack_num = recv_buf.ack_num();
+        let selective_ack = recv_buf.selective_ack();
+        for payload in payloads.into_iter() {
+            let packet = PacketBuilder::new(
+                PacketType::Data,
+                self.cid.send,
+                now_micros,
+                recv_window,
+                seq_num,
+            )
+            .payload(payload)
+            .ts_diff_micros(self.peer_ts_diff.as_micros() as u32)
+            .ack_num(ack_num)
+            .selective_ack(selective_ack.clone())
+            .build();
+            println!(
+                "transmitting {:?} packet of size {}",
+                packet.packet_type(),
+                packet.payload().len()
+            );
             self.transmit(packet, now);
+            seq_num = seq_num.wrapping_add(1);
         }
     }
 
@@ -334,30 +372,16 @@ impl<const N: usize> Connection<N> {
         let (data, tx) = write;
 
         match &mut self.state {
-            State::Connecting(..) => {
+            State::Connecting(..) | State::Established { .. } => {
                 self.pending_writes.push_back((data, tx));
             }
-            State::Established { send_buf, .. } => {
-                if self.pending_writes.is_empty() && data.len() <= send_buf.available() {
-                    send_buf.write(&data).unwrap();
-                    let _ = tx.send(Ok(data.len()));
-                } else {
-                    self.pending_writes.push_back((data, tx));
-                }
-            }
             State::Closing {
-                send_buf,
                 local_fin,
                 remote_fin,
                 ..
             } => {
                 if local_fin.is_none() && remote_fin.is_some() {
-                    if self.pending_writes.is_empty() && data.len() <= send_buf.available() {
-                        send_buf.write(&data).unwrap();
-                        let _ = tx.send(Ok(data.len()));
-                    } else {
-                        self.pending_writes.push_back((data, tx));
-                    }
+                    self.pending_writes.push_back((data, tx));
                 } else {
                     let _ = tx.send(Ok(0));
                 }
@@ -586,7 +610,9 @@ impl<const N: usize> Connection<N> {
                     if ack_num == syn {
                         let recv_buf = ReceiveBuffer::new(seq_num);
                         let send_buf = SendBuffer::new();
-                        let sent_packets = SentPackets::new(syn);
+
+                        let congestion_config = congestion::Config::from(self.config);
+                        let sent_packets = SentPackets::new(syn, congestion_config);
 
                         let _ = connected.take().unwrap().send(Ok(()));
                         self.state = State::Established {
@@ -636,7 +662,9 @@ impl<const N: usize> Connection<N> {
                         recv_buf.write(data, seq_num);
 
                         let send_buf = SendBuffer::new();
-                        let sent_packets = SentPackets::new(syn_ack);
+
+                        let congestion_config = congestion::Config::from(self.config);
+                        let sent_packets = SentPackets::new(syn_ack, congestion_config);
 
                         let _ = connected.take().unwrap().send(Ok(()));
                         self.state = State::Established {
@@ -899,6 +927,7 @@ mod test {
         Connection {
             state: State::Connecting(Some(connected)),
             cid,
+            config: ConnectionConfig::default(),
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,
@@ -974,7 +1003,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let mut sent_packets = SentPackets::new(syn_ack);
+        let congestion_config = congestion::Config::from(conn.config);
+        let mut sent_packets = SentPackets::new(syn_ack, congestion_config);
 
         let data = vec![0xef];
         let len = 64;
@@ -1034,7 +1064,9 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_config = congestion::Config::from(conn.config);
+        let sent_packets = SentPackets::new(syn_ack, congestion_config);
+
         let send_buf = SendBuffer::new();
         let recv_buf = ReceiveBuffer::new(syn);
         conn.state = State::Established {
@@ -1065,7 +1097,9 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_config = congestion::Config::from(conn.config);
+        let sent_packets = SentPackets::new(syn_ack, congestion_config);
+
         let send_buf = SendBuffer::new();
         let recv_buf = ReceiveBuffer::new(syn);
         let local_fin = syn_ack.wrapping_add(3);
@@ -1099,7 +1133,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let sent_packets = SentPackets::new(syn_ack);
+        let congestion_config = congestion::Config::from(conn.config);
+        let sent_packets = SentPackets::new(syn_ack, congestion_config);
         let send_buf = SendBuffer::new();
         let recv_buf = ReceiveBuffer::new(syn);
         let fin = syn.wrapping_add(3);

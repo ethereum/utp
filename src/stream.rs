@@ -8,7 +8,8 @@ use crate::conn;
 use crate::event::StreamEvent;
 use crate::packet::Packet;
 
-const N: usize = u16::MAX as usize;
+/// The size of the send and receive buffers.
+const BUF_LEN: usize = 1024 * 1024;
 
 pub struct UtpStream {
     cid: ConnectionId,
@@ -20,12 +21,13 @@ pub struct UtpStream {
 impl UtpStream {
     pub(crate) fn new(
         cid: ConnectionId,
+        config: conn::ConnectionConfig,
         syn: Option<Packet>,
         outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
         events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
-        let mut conn = conn::Connection::<N>::new(cid, syn, connected, outgoing);
+        let mut conn = conn::Connection::<BUF_LEN>::new(cid, config, syn, connected, outgoing);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();

@@ -7,6 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, StdConnectionIdGenerator};
+use crate::conn::ConnectionConfig;
 use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
@@ -55,6 +56,8 @@ impl UtpSocket {
                             }
                         };
 
+                        println!("received {:?} packet (seq: {}, ack: {}) with payload size {} from {}", packet.packet_type(), packet.seq_num(), packet.ack_num(), packet.payload().len(), src);
+
                         let init_cid = cid_from_packet(&packet, src, true);
                         let acc_cid = cid_from_packet(&packet, src, false);
                         let conns = conns.write().unwrap();
@@ -74,6 +77,7 @@ impl UtpSocket {
                         std::mem::drop(conns);
                     }
                     Some((outgoing, dst)) = outgoing_rx.recv() => {
+                        println!("sending {:?} packet with payload size {} to {}", outgoing.packet_type(), outgoing.payload().len(), dst);
                         let encoded = outgoing.encode();
                         let _ = udp.send_to(&encoded, dst).await;
                     }
@@ -82,20 +86,21 @@ impl UtpSocket {
 
                         let cid = cid_from_packet(&syn, src, false);
                         let (connected_tx, connected_rx) = oneshot::channel();
-                        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+                        let (events_tx, events_rx) = mpsc::unbounded_channel();
 
                         {
                             conns
                                 .write()
                                 .unwrap()
-                                .insert(cid, incoming_tx);
+                                .insert(cid, events_tx);
                         }
 
                         let stream = UtpStream::new(
                             cid,
+                            ConnectionConfig::default(),
                             Some(syn),
                             outgoing_tx.clone(),
-                            incoming_rx,
+                            events_rx,
                             connected_tx,
                         );
 
@@ -134,13 +139,20 @@ impl UtpSocket {
     pub async fn connect(&self, addr: SocketAddr) -> io::Result<UtpStream> {
         let cid = self.cid_gen.lock().unwrap().cid(addr);
         let (connected_tx, connected_rx) = oneshot::channel();
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
 
         {
-            self.conns.write().unwrap().insert(cid, incoming_tx);
+            self.conns.write().unwrap().insert(cid, events_tx);
         }
 
-        let stream = UtpStream::new(cid, None, self.outgoing.clone(), incoming_rx, connected_tx);
+        let stream = UtpStream::new(
+            cid,
+            ConnectionConfig::default(),
+            None,
+            self.outgoing.clone(),
+            events_rx,
+            connected_tx,
+        );
 
         match connected_rx.await {
             Ok(..) => Ok(stream),
