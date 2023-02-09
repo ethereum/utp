@@ -31,6 +31,11 @@ impl<const N: usize> SendBuffer<N> {
         N - self.pending.iter().fold(0, |acc, x| acc + x.len()) + self.offset
     }
 
+    /// Returns `true` if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     /// Writes `data` into the buffer, returning the number of bytes written.
     pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let available = self.available();

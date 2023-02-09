@@ -31,6 +31,11 @@ impl<const N: usize> ReceiveBuffer<N> {
         N - self.offset - self.pending.values().fold(0, |acc, data| acc + data.len())
     }
 
+    /// Returns `true` if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.offset == 0 && self.pending.is_empty()
+    }
+
     /// Returns the initial sequence number of the buffer.
     pub fn init_seq_num(&self) -> u16 {
         self.init_seq_num
