@@ -117,10 +117,7 @@ impl<const N: usize> Connection<N> {
         }
 
         // If there are any lost packets, then queue retransmissions.
-        let lost_packets = self.lost_packets();
-        for packet in lost_packets {
-            self.transmit(packet, now);
-        }
+        self.retransmit_lost_packets(now);
 
         // If the connection is ready to be closed, then close the connection.
 
@@ -319,34 +316,6 @@ impl<const N: usize> Connection<N> {
         self.state = State::Closed { err: Some(err) }
     }
 
-    fn transmit(&mut self, packet: Packet, now: Instant) -> bool {
-        let sent_packets = match &mut self.state {
-            State::Connecting | State::Closed { .. } => return false,
-            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
-                sent_packets
-            }
-        };
-
-        let payload = if packet.payload().is_empty() {
-            None
-        } else {
-            Some(packet.payload().clone())
-        };
-
-        sent_packets.on_transmit(
-            packet.seq_num(),
-            packet.packet_type(),
-            payload,
-            packet.encoded_len() as u32,
-            now,
-        );
-        self.outgoing
-            .send(packet)
-            .expect("outgoing channel should be open if connection is not closed");
-
-        true
-    }
-
     fn state_packet(&self) -> Option<Packet> {
         let now = crate::time::now_micros();
         let conn_id = self.cid.send;
@@ -389,9 +358,9 @@ impl<const N: usize> Connection<N> {
         }
     }
 
-    fn lost_packets(&self) -> Vec<Packet> {
-        let (sent_packets, recv_buf) = match &self.state {
-            State::Connecting | State::Closed { .. } => return vec![],
+    fn retransmit_lost_packets(&mut self, now: Instant) {
+        let (sent_packets, recv_buf) = match &mut self.state {
+            State::Connecting | State::Closed { .. } => return,
             State::Established {
                 sent_packets,
                 recv_buf,
@@ -404,17 +373,17 @@ impl<const N: usize> Connection<N> {
             } => (sent_packets, recv_buf),
         };
 
-        let mut lost = vec![];
         if !sent_packets.has_lost_packets() {
-            return lost;
+            return;
         }
 
         let conn_id = self.cid.send;
-        let now = crate::time::now_micros();
+        let now_micros = crate::time::now_micros();
         let recv_window = recv_buf.available() as u32;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
         for (seq_num, packet_type, payload) in sent_packets.lost_packets() {
-            let mut packet = PacketBuilder::new(packet_type, conn_id, now, recv_window, seq_num);
+            let mut packet =
+                PacketBuilder::new(packet_type, conn_id, now_micros, recv_window, seq_num);
             if let Some(payload) = payload {
                 packet = packet.payload(payload);
             }
@@ -424,10 +393,34 @@ impl<const N: usize> Connection<N> {
                 .selective_ack(recv_buf.selective_ack())
                 .build();
 
-            lost.push(packet);
+            Self::transmit(sent_packets, &mut self.outgoing, packet, now);
         }
+    }
 
-        lost
+    fn transmit(
+        sent_packets: &mut SentPackets,
+        outgoing: &mut mpsc::Sender<Packet>,
+        packet: Packet,
+        now: Instant,
+    ) -> bool {
+        let payload = if packet.payload().is_empty() {
+            None
+        } else {
+            Some(packet.payload().clone())
+        };
+
+        sent_packets.on_transmit(
+            packet.seq_num(),
+            packet.packet_type(),
+            payload,
+            packet.encoded_len() as u32,
+            now,
+        );
+        outgoing
+            .send(packet)
+            .expect("outgoing channel should be open if connection is not closed");
+
+        true
     }
 }
 
