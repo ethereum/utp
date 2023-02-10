@@ -27,14 +27,14 @@ impl<const N: usize> SendBuffer<N> {
         }
     }
 
-    /// Returns `true` if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-
     /// Returns the number of bytes available in the buffer.
     pub fn available(&self) -> usize {
         N - self.pending.iter().fold(0, |acc, x| acc + x.len()) + self.offset
+    }
+
+    /// Returns `true` if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
     }
 
     /// Writes `data` into the buffer, returning the number of bytes written.

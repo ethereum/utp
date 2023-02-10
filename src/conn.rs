@@ -363,7 +363,14 @@ impl<const N: usize> Connection<N> {
                 packet.packet_type(),
                 packet.payload().len()
             );
-            self.transmit(packet, now);
+            Self::transmit(
+                sent_packets,
+                &mut self.unacked,
+                &mut self.outgoing,
+                packet,
+                self.cid.peer,
+                now,
+            );
             seq_num = seq_num.wrapping_add(1);
         }
     }
@@ -498,7 +505,14 @@ impl<const N: usize> Connection<N> {
                     .ts_micros(now_micros)
                     .ts_diff_micros(ts_diff_micros)
                     .build();
-                self.transmit(packet, now);
+                Self::transmit(
+                    sent_packets,
+                    &mut self.unacked,
+                    &mut self.outgoing,
+                    packet,
+                    self.cid.peer,
+                    now,
+                );
             }
             State::Closed { .. } => {}
         }
@@ -539,10 +553,7 @@ impl<const N: usize> Connection<N> {
         }
 
         // If there are any lost packets, then queue retransmissions.
-        let lost_packets = self.lost_packets();
-        for packet in lost_packets {
-            self.transmit(packet, now);
-        }
+        self.retransmit_lost_packets(now);
 
         // If the connection is ready to be closed, then close the connection.
 
@@ -611,8 +622,9 @@ impl<const N: usize> Connection<N> {
                         let recv_buf = ReceiveBuffer::new(seq_num);
                         let send_buf = SendBuffer::new();
 
-                        let congestion_config = congestion::Config::from(self.config);
-                        let sent_packets = SentPackets::new(syn, congestion_config);
+                        let congestion_ctrl =
+                            congestion::Controller::new(congestion::Config::default());
+                        let sent_packets = SentPackets::new(syn, congestion_ctrl);
 
                         let _ = connected.take().unwrap().send(Ok(()));
                         self.state = State::Established {
@@ -663,8 +675,9 @@ impl<const N: usize> Connection<N> {
 
                         let send_buf = SendBuffer::new();
 
-                        let congestion_config = congestion::Config::from(self.config);
-                        let sent_packets = SentPackets::new(syn_ack, congestion_config);
+                        let congestion_ctrl =
+                            congestion::Controller::new(congestion::Config::default());
+                        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
 
                         let _ = connected.take().unwrap().send(Ok(()));
                         self.state = State::Established {
@@ -777,36 +790,6 @@ impl<const N: usize> Connection<N> {
         self.state = State::Closed { err: Some(err) }
     }
 
-    fn transmit(&mut self, packet: Packet, now: Instant) -> bool {
-        let sent_packets = match &mut self.state {
-            State::Connecting(..) | State::Closed { .. } => return false,
-            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
-                sent_packets
-            }
-        };
-
-        let (payload, len) = if packet.payload().is_empty() {
-            (None, 0)
-        } else {
-            (Some(packet.payload().clone()), packet.payload().len())
-        };
-
-        sent_packets.on_transmit(
-            packet.seq_num(),
-            packet.packet_type(),
-            payload,
-            len as u32,
-            now,
-        );
-        self.unacked
-            .insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
-        self.outgoing
-            .send((packet, self.cid.peer))
-            .expect("outgoing channel should be open if connection is not closed");
-
-        true
-    }
-
     fn syn_packet(&self, seq_num: u16) -> Packet {
         let now_micros = crate::time::now_micros();
         PacketBuilder::new(
@@ -862,9 +845,9 @@ impl<const N: usize> Connection<N> {
         }
     }
 
-    fn lost_packets(&self) -> Vec<Packet> {
-        let (sent_packets, recv_buf) = match &self.state {
-            State::Connecting(..) | State::Closed { .. } => return vec![],
+    fn retransmit_lost_packets(&mut self, now: Instant) {
+        let (sent_packets, recv_buf) = match &mut self.state {
+            State::Connecting(..) | State::Closed { .. } => return,
             State::Established {
                 sent_packets,
                 recv_buf,
@@ -877,17 +860,17 @@ impl<const N: usize> Connection<N> {
             } => (sent_packets, recv_buf),
         };
 
-        let mut lost = vec![];
         if !sent_packets.has_lost_packets() {
-            return lost;
+            return;
         }
 
         let conn_id = self.cid.send;
-        let now = crate::time::now_micros();
+        let now_micros = crate::time::now_micros();
         let recv_window = recv_buf.available() as u32;
         let ts_diff_micros = self.peer_ts_diff.as_micros() as u32;
         for (seq_num, packet_type, payload) in sent_packets.lost_packets() {
-            let mut packet = PacketBuilder::new(packet_type, conn_id, now, recv_window, seq_num);
+            let mut packet =
+                PacketBuilder::new(packet_type, conn_id, now_micros, recv_window, seq_num);
             if let Some(payload) = payload {
                 packet = packet.payload(payload);
             }
@@ -897,10 +880,42 @@ impl<const N: usize> Connection<N> {
                 .selective_ack(recv_buf.selective_ack())
                 .build();
 
-            lost.push(packet);
+            Self::transmit(
+                sent_packets,
+                &mut self.unacked,
+                &mut self.outgoing,
+                packet,
+                self.cid.peer,
+                now,
+            );
         }
+    }
 
-        lost
+    fn transmit(
+        sent_packets: &mut SentPackets,
+        unacked: &mut HashMapDelay<u16, Packet>,
+        outgoing: &mut mpsc::UnboundedSender<(Packet, SocketAddr)>,
+        packet: Packet,
+        dest: SocketAddr,
+        now: Instant,
+    ) {
+        let (payload, len) = if packet.payload().is_empty() {
+            (None, 0)
+        } else {
+            (Some(packet.payload().clone()), packet.payload().len())
+        };
+
+        sent_packets.on_transmit(
+            packet.seq_num(),
+            packet.packet_type(),
+            payload,
+            len as u32,
+            now,
+        );
+        unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
+        outgoing
+            .send((packet, dest))
+            .expect("outgoing channel should be open if connection is not closed");
     }
 }
 
@@ -1003,8 +1018,8 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let congestion_config = congestion::Config::from(conn.config);
-        let mut sent_packets = SentPackets::new(syn_ack, congestion_config);
+        let congestion_ctrl = congestion::Controller::new(conn.config.into());
+        let mut sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
 
         let data = vec![0xef];
         let len = 64;
@@ -1064,11 +1079,11 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let congestion_config = congestion::Config::from(conn.config);
-        let sent_packets = SentPackets::new(syn_ack, congestion_config);
-
         let send_buf = SendBuffer::new();
+        let congestion_ctrl = congestion::Controller::new(conn.config.into());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
+
         conn.state = State::Established {
             send_buf,
             sent_packets,
@@ -1097,11 +1112,11 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let congestion_config = congestion::Config::from(conn.config);
-        let sent_packets = SentPackets::new(syn_ack, congestion_config);
-
         let send_buf = SendBuffer::new();
+        let congestion_ctrl = congestion::Controller::new(conn.config.into());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
+
         let local_fin = syn_ack.wrapping_add(3);
         conn.state = State::Closing {
             send_buf,
@@ -1133,10 +1148,11 @@ mod test {
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
         let mut conn = conn(endpoint);
 
-        let congestion_config = congestion::Config::from(conn.config);
-        let sent_packets = SentPackets::new(syn_ack, congestion_config);
         let send_buf = SendBuffer::new();
+        let congestion_ctrl = congestion::Controller::new(conn.config.into());
+        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
+
         let fin = syn.wrapping_add(3);
         conn.state = State::Closing {
             send_buf,
