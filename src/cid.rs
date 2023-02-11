@@ -13,6 +13,7 @@ pub trait ConnectionIdGenerator<P> {
     fn cid(&mut self, peer: P) -> ConnectionId;
 }
 
+#[derive(Clone, Debug, Default)]
 pub struct StdConnectionIdGenerator {
     cids: HashSet<ConnectionId>,
 }

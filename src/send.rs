@@ -3,6 +3,7 @@ use std::io;
 
 type Bytes = Vec<u8>;
 
+#[derive(Clone, Debug)]
 pub struct SendBuffer<const N: usize> {
     pending: VecDeque<Bytes>,
     offset: usize,
