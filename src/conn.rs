@@ -324,7 +324,6 @@ impl<const N: usize> Connection<N> {
             let max_packet_size = cmp::min(window, usize::from(self.config.max_packet_size - 64));
             let mut data = vec![0; max_packet_size];
             let n = send_buf.read(&mut data).unwrap();
-            println!("window: {window} and max packet size: {max_packet_size} and n: {n}");
             if n == 0 {
                 break;
             }
@@ -364,11 +363,6 @@ impl<const N: usize> Connection<N> {
             .ack_num(ack_num)
             .selective_ack(selective_ack.clone())
             .build();
-            println!(
-                "transmitting {:?} packet of size {}",
-                packet.packet_type(),
-                packet.payload().len()
-            );
             Self::transmit(
                 sent_packets,
                 &mut self.unacked,

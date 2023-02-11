@@ -65,7 +65,6 @@ impl UtpStream {
             match rx.await {
                 Ok(result) => match result {
                     Ok(mut data) => {
-                        println!("read_to_eof: data len {}", data.len());
                         if data.is_empty() {
                             break Ok(n);
                         }
