@@ -56,10 +56,8 @@ impl UtpSocket {
                             }
                         };
 
-                        println!("received {:?} packet (seq: {}, ack: {}) with payload size {} from {}", packet.packet_type(), packet.seq_num(), packet.ack_num(), packet.payload().len(), src);
-
-                        let init_cid = cid_from_packet(&packet, src, true);
-                        let acc_cid = cid_from_packet(&packet, src, false);
+                        let init_cid = cid_from_packet(&packet, src, false);
+                        let acc_cid = cid_from_packet(&packet, src, true);
                         let conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
@@ -77,14 +75,13 @@ impl UtpSocket {
                         std::mem::drop(conns);
                     }
                     Some((outgoing, dst)) = outgoing_rx.recv() => {
-                        println!("sending {:?} packet with payload size {} to {}", outgoing.packet_type(), outgoing.payload().len(), dst);
                         let encoded = outgoing.encode();
                         let _ = udp.send_to(&encoded, dst).await;
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (syn, src) = incoming_conns.pop_front().unwrap();
 
-                        let cid = cid_from_packet(&syn, src, false);
+                        let cid = cid_from_packet(&syn, src, true);
                         let (connected_tx, connected_rx) = oneshot::channel();
                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -161,8 +158,8 @@ impl UtpSocket {
     }
 }
 
-fn cid_from_packet(packet: &Packet, src: SocketAddr, local_initiator: bool) -> ConnectionId {
-    if local_initiator {
+fn cid_from_packet(packet: &Packet, src: SocketAddr, from_initiator: bool) -> ConnectionId {
+    if !from_initiator {
         let (send, recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
         ConnectionId {
             send,

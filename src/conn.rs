@@ -25,6 +25,7 @@ enum Error {
     InvalidSyn,
     Reset,
     SynFromAcceptor,
+    TimedOut,
 }
 
 impl From<Error> for io::ErrorKind {
@@ -34,13 +35,14 @@ impl From<Error> for io::ErrorKind {
             EmptyDataPayload | InvalidAckNum | InvalidFin | InvalidSeqNum | InvalidSyn
             | SynFromAcceptor => io::ErrorKind::InvalidData,
             Reset => io::ErrorKind::ConnectionReset,
+            TimedOut => io::ErrorKind::TimedOut,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
-    Initiator((u16, Option<Instant>)),
+    Initiator((u16, usize)),
     Acceptor((u16, u16)),
 }
 
@@ -69,6 +71,7 @@ pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
     pub max_packet_size: u16,
+    pub max_conn_attempts: usize,
     pub initial_timeout: Duration,
 }
 
@@ -76,6 +79,7 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             max_packet_size: 2048,
+            max_conn_attempts: 3,
             initial_timeout: Duration::from_millis(500),
         }
     }
@@ -125,7 +129,7 @@ impl<const N: usize> Connection<N> {
             }
             None => {
                 let syn = rand::random();
-                let endpoint = Endpoint::Initiator((syn, None));
+                let endpoint = Endpoint::Initiator((syn, 0));
                 (endpoint, Duration::ZERO, u32::MAX)
             }
         };
@@ -157,12 +161,12 @@ impl<const N: usize> Connection<N> {
         // then send the SYN-ACK.
         match self.endpoint {
             Endpoint::Initiator((syn_seq_num, ..)) => {
-                let now = Instant::now();
-
                 let syn = self.syn_packet(syn_seq_num);
-                self.outgoing.send((syn, self.cid.peer)).unwrap();
+                self.outgoing.send((syn.clone(), self.cid.peer)).unwrap();
+                self.unacked
+                    .insert_at(syn_seq_num, syn, self.config.initial_timeout);
 
-                self.endpoint = Endpoint::Initiator((syn_seq_num, Some(now)));
+                self.endpoint = Endpoint::Initiator((syn_seq_num, 1));
             }
             Endpoint::Acceptor(..) => {
                 let state = self.state_packet().unwrap();
@@ -207,6 +211,8 @@ impl<const N: usize> Connection<N> {
             }
 
             if std::matches!(self.state, State::Closed { .. }) {
+                self.process_reads();
+                self.process_writes(Instant::now());
                 break;
             }
         }
@@ -481,7 +487,26 @@ impl<const N: usize> Connection<N> {
 
     fn on_timeout(&mut self, packet: Packet, now: Instant) {
         match &mut self.state {
-            State::Connecting(..) => {}
+            State::Connecting(connected) => match &mut self.endpoint {
+                Endpoint::Initiator((syn, attempts)) => {
+                    if *attempts >= self.config.max_conn_attempts {
+                        let err = Error::TimedOut;
+                        if let Some(connected) = connected.take() {
+                            let err = io::Error::from(io::ErrorKind::from(err));
+                            let _ = connected.send(Err(err));
+                        }
+                        self.state = State::Closed { err: Some(err) };
+                    } else {
+                        let seq = *syn;
+                        *attempts += 1;
+                        let packet = self.syn_packet(seq);
+                        let _ = self.outgoing.send((packet.clone(), self.cid.peer));
+                        self.unacked
+                            .insert_at(seq, packet, self.config.initial_timeout);
+                    }
+                }
+                Endpoint::Acceptor(..) => {}
+            },
             State::Established {
                 sent_packets,
                 recv_buf,
@@ -622,8 +647,7 @@ impl<const N: usize> Connection<N> {
                         let recv_buf = ReceiveBuffer::new(seq_num);
                         let send_buf = SendBuffer::new();
 
-                        let congestion_ctrl =
-                            congestion::Controller::new(congestion::Config::default());
+                        let congestion_ctrl = congestion::Controller::new(self.config.into());
                         let sent_packets = SentPackets::new(syn, congestion_ctrl);
 
                         let _ = connected.take().unwrap().send(Ok(()));
@@ -675,8 +699,7 @@ impl<const N: usize> Connection<N> {
 
                         let send_buf = SendBuffer::new();
 
-                        let congestion_ctrl =
-                            congestion::Controller::new(congestion::Config::default());
+                        let congestion_ctrl = congestion::Controller::new(self.config.into());
                         let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
 
                         let _ = connected.take().unwrap().send(Ok(()));
@@ -902,16 +925,13 @@ impl<const N: usize> Connection<N> {
         let (payload, len) = if packet.payload().is_empty() {
             (None, 0)
         } else {
-            (Some(packet.payload().clone()), packet.payload().len())
+            (
+                Some(packet.payload().clone()),
+                packet.payload().len() as u32,
+            )
         };
 
-        sent_packets.on_transmit(
-            packet.seq_num(),
-            packet.packet_type(),
-            payload,
-            len as u32,
-            now,
-        );
+        sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
         outgoing
             .send((packet, dest))
@@ -958,7 +978,7 @@ mod test {
     #[test]
     fn on_syn_initiator() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator((syn, None));
+        let endpoint = Endpoint::Initiator((syn, 1));
         let mut conn = conn(endpoint);
 
         conn.on_syn(syn);
@@ -1001,7 +1021,7 @@ mod test {
     #[test]
     fn on_state_connecting_initiator() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator((syn, None));
+        let endpoint = Endpoint::Initiator((syn, 1));
         let mut conn = conn(endpoint);
 
         let seq_num = 1;
@@ -1175,7 +1195,7 @@ mod test {
     #[test]
     fn on_reset_non_closed() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator((syn, None));
+        let endpoint = Endpoint::Initiator((syn, 1));
         let mut conn = conn(endpoint);
 
         conn.on_reset();
@@ -1190,7 +1210,7 @@ mod test {
     #[test]
     fn on_reset_closed() {
         let syn = 100;
-        let endpoint = Endpoint::Initiator((syn, None));
+        let endpoint = Endpoint::Initiator((syn, 1));
         let mut conn = conn(endpoint);
 
         conn.state = State::Closed { err: None };
