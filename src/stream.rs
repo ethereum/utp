@@ -9,6 +9,7 @@ use crate::event::StreamEvent;
 use crate::packet::Packet;
 
 /// The size of the send and receive buffers.
+// TODO: Make the buffer size configurable.
 const BUF: usize = 1024 * 1024;
 
 pub struct UtpStream {
@@ -50,23 +51,30 @@ impl UtpStream {
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let mut offset = 0;
+        let mut n = 0;
+
+        // Reserve space in the buffer to avoid expensive allocation for small reads.
+        buf.reserve(2048);
 
         loop {
             let (tx, rx) = oneshot::channel();
             self.reads
-                .send((buf.len(), tx))
+                .send((buf.capacity(), tx))
                 .map_err(|_| io::Error::from(io::ErrorKind::Interrupted))?;
 
             match rx.await {
                 Ok(result) => match result {
-                    Ok(data) => {
+                    Ok(mut data) => {
+                        println!("read_to_eof: data len {}", data.len());
                         if data.is_empty() {
-                            break Ok(offset);
+                            break Ok(n);
                         }
-                        let end = offset + data.len();
-                        buf[offset..end].copy_from_slice(data.as_slice());
-                        offset = end;
+                        n += data.len();
+                        buf.append(&mut data);
+
+                        // Reserve additional space in the buffer proportional to the amount of
+                        // data read.
+                        buf.reserve(data.len());
                     }
                     Err(err) => return Err(err),
                 },

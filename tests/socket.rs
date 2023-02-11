@@ -11,7 +11,7 @@ async fn socket() {
 
     let recv_handle = tokio::spawn(async move {
         let mut stream = recv.accept().await.unwrap();
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
         assert_eq!(n, data.len());
         assert_eq!(buf, data);
