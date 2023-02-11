@@ -230,6 +230,7 @@ impl<const N: usize> Connection<N> {
             } => {
                 let mut local_fin = None;
                 if self.pending_writes.is_empty() && send_buf.is_empty() {
+                    // TODO: Helper for construction of FIN.
                     let recv_window = recv_buf.available() as u32;
                     let seq_num = sent_packets.next_seq_num();
                     let ack_num = recv_buf.ack_num();
@@ -265,6 +266,7 @@ impl<const N: usize> Connection<N> {
                 ..
             } => {
                 if local_fin.is_none() && self.pending_writes.is_empty() && send_buf.is_empty() {
+                    // TODO: Helper for construction of FIN.
                     let recv_window = recv_buf.available() as u32;
                     let seq_num = sent_packets.next_seq_num();
                     let ack_num = recv_buf.ack_num();
@@ -321,8 +323,9 @@ impl<const N: usize> Connection<N> {
         let mut window = cmp::min(sent_packets.window(), self.peer_recv_window) as usize;
         let mut payloads = Vec::new();
         while window > 0 {
-            let max_packet_size = cmp::min(window, usize::from(self.config.max_packet_size - 64));
-            let mut data = vec![0; max_packet_size];
+            // TODO: Do not rely on approximation here. Account for header and extensions.
+            let max_data_size = cmp::min(window, usize::from(self.config.max_packet_size - 64));
+            let mut data = vec![0; max_data_size];
             let n = send_buf.read(&mut data).unwrap();
             if n == 0 {
                 break;
@@ -346,6 +349,7 @@ impl<const N: usize> Connection<N> {
         }
 
         // Transmit data packets.
+        // TODO: Helper for construction of DATA packet.
         let mut seq_num = sent_packets.next_seq_num();
         let recv_window = recv_buf.available() as u32;
         let ack_num = recv_buf.ack_num();
@@ -574,7 +578,7 @@ impl<const N: usize> Connection<N> {
         // If there are any lost packets, then queue retransmissions.
         self.retransmit_lost_packets(now);
 
-        // If the connection is ready to be closed, then close the connection.
+        // TODO: If the connection is ready to be closed, then close the connection.
 
         // Send a STATE packet if appropriate packet and connection in appropriate state.
         //
@@ -659,6 +663,7 @@ impl<const N: usize> Connection<N> {
                 if range.contains(ack_num) {
                     sent_packets.on_ack(ack_num, selective_ack, delay, now);
                     self.unacked.remove(&ack_num);
+                    // TODO: Helper for selective ACK.
                     if let Some(selective_ack) = selective_ack {
                         for (i, acked) in selective_ack.acked().iter().enumerate() {
                             let seq_num = (usize::from(ack_num) + 2 + i) as u16;

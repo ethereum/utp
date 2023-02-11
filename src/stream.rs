@@ -51,11 +51,10 @@ impl UtpStream {
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let mut n = 0;
-
         // Reserve space in the buffer to avoid expensive allocation for small reads.
         buf.reserve(2048);
 
+        let mut n = 0;
         loop {
             let (tx, rx) = oneshot::channel();
             self.reads
