@@ -1,32 +1,50 @@
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::net::SocketAddr;
 
+/// A remote peer.
+pub trait ConnectionPeer: Clone + Debug + Eq + Hash + PartialEq + Send + Sync {}
+
+impl ConnectionPeer for SocketAddr {}
+
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-pub struct ConnectionId {
+pub struct ConnectionId<P> {
     pub send: u16,
     pub recv: u16,
-    pub peer: SocketAddr,
+    pub peer: P,
 }
 
 pub trait ConnectionIdGenerator<P> {
-    fn cid(&mut self, peer: P) -> ConnectionId;
+    fn cid(&mut self, peer: P) -> ConnectionId<P>;
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct StdConnectionIdGenerator {
-    cids: HashSet<ConnectionId>,
+pub struct StdConnectionIdGenerator<P> {
+    cids: HashSet<ConnectionId<P>>,
 }
 
-impl ConnectionIdGenerator<SocketAddr> for StdConnectionIdGenerator {
-    fn cid(&mut self, peer: SocketAddr) -> ConnectionId {
+impl<P> StdConnectionIdGenerator<P> {
+    pub fn new() -> Self {
+        Self {
+            cids: HashSet::new(),
+        }
+    }
+}
+
+impl<P: ConnectionPeer> ConnectionIdGenerator<P> for StdConnectionIdGenerator<P> {
+    fn cid(&mut self, peer: P) -> ConnectionId<P> {
         loop {
             let recv: u16 = rand::random();
             let send = recv.wrapping_add(1);
-            let cid = ConnectionId { send, recv, peer };
+            let cid = ConnectionId {
+                send,
+                recv,
+                peer: peer.clone(),
+            };
 
             if !self.cids.contains(&cid) {
-                self.cids.insert(cid);
+                self.cids.insert(cid.clone());
                 break cid;
             }
         }

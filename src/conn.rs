@@ -1,14 +1,13 @@
 use std::cmp;
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use delay_map::HashMapDelay;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use crate::cid::ConnectionId;
+use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::congestion;
 use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
@@ -94,14 +93,14 @@ impl From<ConnectionConfig> for congestion::Config {
     }
 }
 
-pub struct Connection<const N: usize> {
+pub struct Connection<const N: usize, P> {
     state: State<N>,
-    cid: ConnectionId,
+    cid: ConnectionId<P>,
     config: ConnectionConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
-    outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
+    outgoing: mpsc::UnboundedSender<(Packet, P)>,
     unacked: HashMapDelay<u16, Packet>,
     pending_reads: VecDeque<Read>,
     readable: Notify,
@@ -109,13 +108,13 @@ pub struct Connection<const N: usize> {
     writable: Notify,
 }
 
-impl<const N: usize> Connection<N> {
+impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     pub fn new(
-        cid: ConnectionId,
+        cid: ConnectionId<P>,
         config: ConnectionConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
-        outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
+        outgoing: mpsc::UnboundedSender<(Packet, P)>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
@@ -162,7 +161,9 @@ impl<const N: usize> Connection<N> {
         match self.endpoint {
             Endpoint::Initiator((syn_seq_num, ..)) => {
                 let syn = self.syn_packet(syn_seq_num);
-                self.outgoing.send((syn.clone(), self.cid.peer)).unwrap();
+                self.outgoing
+                    .send((syn.clone(), self.cid.peer.clone()))
+                    .unwrap();
                 self.unacked
                     .insert_at(syn_seq_num, syn, self.config.initial_timeout);
 
@@ -170,7 +171,7 @@ impl<const N: usize> Connection<N> {
             }
             Endpoint::Acceptor(..) => {
                 let state = self.state_packet().unwrap();
-                self.outgoing.send((state, self.cid.peer)).unwrap();
+                self.outgoing.send((state, self.cid.peer.clone())).unwrap();
             }
         }
 
@@ -247,7 +248,7 @@ impl<const N: usize> Connection<N> {
                     .build();
 
                     local_fin = Some(seq_num);
-                    let _ = self.outgoing.send((fin, self.cid.peer));
+                    let _ = self.outgoing.send((fin, self.cid.peer.clone()));
                 }
 
                 self.state = State::Closing {
@@ -283,7 +284,7 @@ impl<const N: usize> Connection<N> {
                     .build();
 
                     *local_fin = Some(seq_num);
-                    let _ = self.outgoing.send((fin, self.cid.peer));
+                    let _ = self.outgoing.send((fin, self.cid.peer.clone()));
                 }
             }
             State::Closed { .. } => {}
@@ -372,7 +373,7 @@ impl<const N: usize> Connection<N> {
                 &mut self.unacked,
                 &mut self.outgoing,
                 packet,
-                self.cid.peer,
+                &self.cid.peer,
                 now,
             );
             seq_num = seq_num.wrapping_add(1);
@@ -498,7 +499,7 @@ impl<const N: usize> Connection<N> {
                         let seq = *syn;
                         *attempts += 1;
                         let packet = self.syn_packet(seq);
-                        let _ = self.outgoing.send((packet.clone(), self.cid.peer));
+                        let _ = self.outgoing.send((packet.clone(), self.cid.peer.clone()));
                         self.unacked
                             .insert_at(seq, packet, self.config.initial_timeout);
                     }
@@ -533,7 +534,7 @@ impl<const N: usize> Connection<N> {
                     &mut self.unacked,
                     &mut self.outgoing,
                     packet,
-                    self.cid.peer,
+                    &self.cid.peer,
                     now,
                 );
             }
@@ -587,7 +588,7 @@ impl<const N: usize> Connection<N> {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
                     self.outgoing
-                        .send((state, self.cid.peer))
+                        .send((state, self.cid.peer.clone()))
                         .expect("outgoing channel should be open if connection is not closed");
                 }
             }
@@ -907,7 +908,7 @@ impl<const N: usize> Connection<N> {
                 &mut self.unacked,
                 &mut self.outgoing,
                 packet,
-                self.cid.peer,
+                &self.cid.peer,
                 now,
             );
         }
@@ -916,9 +917,9 @@ impl<const N: usize> Connection<N> {
     fn transmit(
         sent_packets: &mut SentPackets,
         unacked: &mut HashMapDelay<u16, Packet>,
-        outgoing: &mut mpsc::UnboundedSender<(Packet, SocketAddr)>,
+        outgoing: &mut mpsc::UnboundedSender<(Packet, P)>,
         packet: Packet,
-        dest: SocketAddr,
+        dest: &P,
         now: Instant,
     ) {
         let (payload, len) = if packet.payload().is_empty() {
@@ -933,7 +934,7 @@ impl<const N: usize> Connection<N> {
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
         outgoing
-            .send((packet, dest))
+            .send((packet, dest.clone()))
             .expect("outgoing channel should be open if connection is not closed");
     }
 }
@@ -947,7 +948,7 @@ mod test {
     const BUF: usize = 2048;
     const DELAY: Duration = Duration::from_millis(100);
 
-    fn conn(endpoint: Endpoint) -> Connection<BUF> {
+    fn conn(endpoint: Endpoint) -> Connection<BUF, SocketAddr> {
         let (connected, _) = oneshot::channel();
         let (outgoing, _) = mpsc::unbounded_channel();
 

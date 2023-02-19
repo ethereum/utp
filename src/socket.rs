@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cid::{ConnectionId, ConnectionIdGenerator, StdConnectionIdGenerator};
+use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
 use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketType};
@@ -17,28 +17,33 @@ type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
-pub struct UtpSocket {
-    conns: Arc<RwLock<HashMap<ConnectionId, ConnChannel>>>,
-    cid_gen: Mutex<StdConnectionIdGenerator>,
-    accepts: mpsc::UnboundedSender<oneshot::Sender<io::Result<UtpStream>>>,
-    outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
+pub struct UtpSocket<P> {
+    conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
+    cid_gen: Mutex<StdConnectionIdGenerator<P>>,
+    accepts: mpsc::UnboundedSender<oneshot::Sender<io::Result<UtpStream<P>>>>,
+    outgoing: mpsc::UnboundedSender<(Packet, P)>,
 }
 
-impl UtpSocket {
+impl UtpSocket<SocketAddr> {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
         let socket = Self::with_socket(socket);
         Ok(socket)
     }
+}
 
+impl<P> UtpSocket<P>
+where
+    P: ConnectionPeer + 'static,
+{
     pub fn with_socket<S>(socket: S) -> Self
     where
-        S: AsyncUdpSocket + 'static,
+        S: AsyncUdpSocket<P> + 'static,
     {
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
-        let cid_gen = Mutex::new(StdConnectionIdGenerator::default());
+        let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
         let mut incoming_conns = VecDeque::new();
 
@@ -65,8 +70,8 @@ impl UtpSocket {
                             }
                         };
 
-                        let init_cid = cid_from_packet(&packet, src, false);
-                        let acc_cid = cid_from_packet(&packet, src, true);
+                        let init_cid = cid_from_packet(&packet, &src, false);
+                        let acc_cid = cid_from_packet(&packet, &src, true);
                         let conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
@@ -90,7 +95,7 @@ impl UtpSocket {
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (syn, src) = incoming_conns.pop_front().unwrap();
 
-                        let cid = cid_from_packet(&syn, src, true);
+                        let cid = cid_from_packet(&syn, &src, true);
                         let (connected_tx, connected_rx) = oneshot::channel();
                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -98,7 +103,7 @@ impl UtpSocket {
                             conns
                                 .write()
                                 .unwrap()
-                                .insert(cid, events_tx);
+                                .insert(cid.clone(), events_tx);
                         }
 
                         let stream = UtpStream::new(
@@ -131,7 +136,7 @@ impl UtpSocket {
         utp
     }
 
-    pub async fn accept(&self) -> io::Result<UtpStream> {
+    pub async fn accept(&self) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         self.accepts
             .send(stream_tx)
@@ -142,13 +147,13 @@ impl UtpSocket {
         }
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> io::Result<UtpStream> {
-        let cid = self.cid_gen.lock().unwrap().cid(addr);
+    pub async fn connect(&self, peer: P) -> io::Result<UtpStream<P>> {
+        let cid = self.cid_gen.lock().unwrap().cid(peer);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
         {
-            self.conns.write().unwrap().insert(cid, events_tx);
+            self.conns.write().unwrap().insert(cid.clone(), events_tx);
         }
 
         let stream = UtpStream::new(
@@ -167,13 +172,17 @@ impl UtpSocket {
     }
 }
 
-fn cid_from_packet(packet: &Packet, src: SocketAddr, from_initiator: bool) -> ConnectionId {
+fn cid_from_packet<P: ConnectionPeer>(
+    packet: &Packet,
+    src: &P,
+    from_initiator: bool,
+) -> ConnectionId<P> {
     if !from_initiator {
         let (send, recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
         ConnectionId {
             send,
             recv,
-            peer: src,
+            peer: src.clone(),
         }
     } else {
         let (send, recv) = match packet.packet_type() {
@@ -185,12 +194,12 @@ fn cid_from_packet(packet: &Packet, src: SocketAddr, from_initiator: bool) -> Co
         ConnectionId {
             send,
             recv,
-            peer: src,
+            peer: src.clone(),
         }
     }
 }
 
-impl Drop for UtpSocket {
+impl<P> Drop for UtpSocket<P> {
     fn drop(&mut self) {
         for conn in self.conns.read().unwrap().values() {
             let _ = conn.send(StreamEvent::Shutdown);
