@@ -11,6 +11,7 @@ use crate::conn::ConnectionConfig;
 use crate::event::StreamEvent;
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
+use crate::udp::AsyncUdpSocket;
 
 type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
@@ -25,8 +26,15 @@ pub struct UtpSocket {
 
 impl UtpSocket {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        let udp = UdpSocket::bind(addr).await?;
+        let socket = UdpSocket::bind(addr).await?;
+        let socket = Self::with_socket(socket);
+        Ok(socket)
+    }
 
+    pub fn with_socket<S>(socket: S) -> Self
+    where
+        S: AsyncUdpSocket + 'static,
+    {
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
@@ -37,18 +45,19 @@ impl UtpSocket {
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
-        let socket = Self {
+        let utp = Self {
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
             outgoing: outgoing_tx.clone(),
         };
 
+        let socket = Arc::new(socket);
         tokio::spawn(async move {
             let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
                 tokio::select! {
-                    Ok((n, src)) = udp.recv_from(&mut buf) => {
+                    Ok((n, src)) = socket.recv_from(&mut buf) => {
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
@@ -76,7 +85,7 @@ impl UtpSocket {
                     }
                     Some((outgoing, dst)) = outgoing_rx.recv() => {
                         let encoded = outgoing.encode();
-                        let _ = udp.send_to(&encoded, dst).await;
+                        let _ = socket.send_to(&encoded, &dst).await;
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (syn, src) = incoming_conns.pop_front().unwrap();
@@ -119,7 +128,7 @@ impl UtpSocket {
             }
         });
 
-        Ok(socket)
+        utp
     }
 
     pub async fn accept(&self) -> io::Result<UtpStream> {
