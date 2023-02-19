@@ -1,9 +1,8 @@
 use std::io;
-use std::net::SocketAddr;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cid::ConnectionId;
+use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::conn;
 use crate::event::StreamEvent;
 use crate::packet::Packet;
@@ -12,23 +11,27 @@ use crate::packet::Packet;
 // TODO: Make the buffer size configurable.
 const BUF: usize = 1024 * 1024;
 
-pub struct UtpStream {
-    cid: ConnectionId,
+pub struct UtpStream<P> {
+    cid: ConnectionId<P>,
     reads: mpsc::UnboundedSender<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
-impl UtpStream {
+impl<P> UtpStream<P>
+where
+    P: ConnectionPeer + 'static,
+{
     pub(crate) fn new(
-        cid: ConnectionId,
+        cid: ConnectionId<P>,
         config: conn::ConnectionConfig,
         syn: Option<Packet>,
-        outgoing: mpsc::UnboundedSender<(Packet, SocketAddr)>,
+        outgoing: mpsc::UnboundedSender<(Packet, P)>,
         events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
-        let mut conn = conn::Connection::<BUF>::new(cid, config, syn, connected, outgoing);
+        let mut conn =
+            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, outgoing);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
@@ -46,8 +49,8 @@ impl UtpStream {
         }
     }
 
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.cid.peer
+    pub fn peer(&self) -> &P {
+        &self.cid.peer
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -96,7 +99,9 @@ impl UtpStream {
             Err(..) => Err(io::Error::from(io::ErrorKind::Interrupted)),
         }
     }
+}
 
+impl<P> UtpStream<P> {
     pub fn shutdown(&mut self) -> io::Result<()> {
         match self.shutdown.take() {
             Some(shutdown) => Ok(shutdown
@@ -107,7 +112,7 @@ impl UtpStream {
     }
 }
 
-impl Drop for UtpStream {
+impl<P> Drop for UtpStream<P> {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
