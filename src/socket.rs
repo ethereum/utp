@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
@@ -14,13 +14,14 @@ use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
 
 type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
+type Accept<P> = oneshot::Sender<io::Result<UtpStream<P>>>;
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
 pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
-    accepts: mpsc::UnboundedSender<oneshot::Sender<io::Result<UtpStream<P>>>>,
+    accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
     outgoing: mpsc::UnboundedSender<(Packet, P)>,
 }
 
@@ -45,7 +46,10 @@ where
 
         let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
-        let mut incoming_conns = VecDeque::new();
+        let awaiting: HashMap<ConnectionId<P>, Accept<P>> = HashMap::new();
+        let awaiting = Arc::new(RwLock::new(awaiting));
+
+        let mut incoming_conns = HashMap::new();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
@@ -72,7 +76,7 @@ where
 
                         let init_cid = cid_from_packet(&packet, &src, false);
                         let acc_cid = cid_from_packet(&packet, &src, true);
-                        let conns = conns.write().unwrap();
+                        let mut conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
                             .or_else(|| conns.get(&init_cid));
@@ -82,20 +86,64 @@ where
                             }
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
-                                    incoming_conns.push_back((packet, src));
+                                    let cid = cid_from_packet(&packet, &src, true);
+                                    let mut awaiting = awaiting.write().unwrap();
+
+                                    // If there was an awaiting connection with the CID, then
+                                    // create a new stream for that connection. Otherwise, add the
+                                    // connection to the incoming connections.
+                                    if let Some(accept) = awaiting.remove(&cid) {
+                                        let (connected_tx, connected_rx) = oneshot::channel();
+                                        let (events_tx, events_rx) = mpsc::unbounded_channel();
+
+                                        conns.insert(cid.clone(), events_tx);
+
+                                        let stream = UtpStream::new(
+                                            cid,
+                                            ConnectionConfig::default(),
+                                            Some(packet),
+                                            outgoing_tx.clone(),
+                                            events_rx,
+                                            connected_tx
+                                        );
+
+                                        tokio::spawn(async move {
+                                            Self::await_connected(stream, accept, connected_rx).await
+                                        });
+                                    } else {
+                                        incoming_conns.insert(cid, packet);
+                                    }
                                 }
                             },
                         }
-                        std::mem::drop(conns);
                     }
                     Some((outgoing, dst)) = outgoing_rx.recv() => {
                         let encoded = outgoing.encode();
                         let _ = socket.send_to(&encoded, &dst).await;
                     }
-                    Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
-                        let (syn, src) = incoming_conns.pop_front().unwrap();
+                    Some((accept, cid)) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
+                        let (cid, syn) = match cid {
+                            // If a CID was given, then check for an incoming connection with that
+                            // CID. If one is found, then use that connection. Otherwise, add the
+                            // CID to the awaiting connections.
+                            Some(cid) => {
+                                if let Some(syn) = incoming_conns.remove(&cid) {
+                                    (cid, syn)
+                                } else {
+                                    awaiting.write().unwrap().insert(cid, accept);
+                                    return;
+                                }
+                            }
+                            // If a CID was not given, then pull an incoming connection, and use
+                            // that connection's CID. An incoming connection is known to exist
+                            // because of the condition in the `select` arm.
+                            None => {
+                                let cid = incoming_conns.keys().next().unwrap().clone();
+                                let syn = incoming_conns.remove(&cid).unwrap();
+                                (cid, syn)
+                            }
+                        };
 
-                        let cid = cid_from_packet(&syn, &src, true);
                         let (connected_tx, connected_rx) = oneshot::channel();
                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -116,17 +164,7 @@ where
                         );
 
                         tokio::spawn(async move {
-                            match connected_rx.await {
-                                Ok(Ok(..)) => {
-                                    let _ = accept.send(Ok(stream));
-                                }
-                                Ok(Err(err)) => {
-                                    let _ = accept.send(Err(err));
-                                }
-                                Err(..) => {
-                                    let _ = accept.send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
-                                }
-                            }
+                            Self::await_connected(stream, accept, connected_rx).await
                         });
                     }
                 }
@@ -139,7 +177,18 @@ where
     pub async fn accept(&self) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         self.accepts
-            .send(stream_tx)
+            .send((stream_tx, None))
+            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
+        match stream_rx.await {
+            Ok(stream) => Ok(stream?),
+            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+        }
+    }
+
+    pub async fn accept_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
+        let (stream_tx, stream_rx) = oneshot::channel();
+        self.accepts
+            .send((stream_tx, Some(cid)))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
@@ -168,6 +217,54 @@ where
         match connected_rx.await {
             Ok(..) => Ok(stream),
             Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+        }
+    }
+
+    pub async fn connect_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
+        if self.conns.read().unwrap().contains_key(&cid) {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("connection ID in use"),
+            ));
+        }
+
+        let (connected_tx, connected_rx) = oneshot::channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+
+        {
+            self.conns.write().unwrap().insert(cid.clone(), events_tx);
+        }
+
+        let stream = UtpStream::new(
+            cid,
+            ConnectionConfig::default(),
+            None,
+            self.outgoing.clone(),
+            events_rx,
+            connected_tx,
+        );
+
+        match connected_rx.await {
+            Ok(..) => Ok(stream),
+            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+        }
+    }
+
+    async fn await_connected(
+        stream: UtpStream<P>,
+        accept: Accept<P>,
+        connected: oneshot::Receiver<io::Result<()>>,
+    ) {
+        match connected.await {
+            Ok(Ok(..)) => {
+                let _ = accept.send(Ok(stream));
+            }
+            Ok(Err(err)) => {
+                let _ = accept.send(Err(err));
+            }
+            Err(..) => {
+                let _ = accept.send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
+            }
         }
     }
 }
