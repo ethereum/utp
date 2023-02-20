@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::conn;
-use crate::event::StreamEvent;
+use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
 
 /// The size of the send and receive buffers.
@@ -26,18 +26,18 @@ where
         cid: ConnectionId<P>,
         config: conn::ConnectionConfig,
         syn: Option<Packet>,
-        outgoing: mpsc::UnboundedSender<(Packet, P)>,
-        events: mpsc::UnboundedReceiver<StreamEvent>,
+        socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+        stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
         let mut conn =
-            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, outgoing);
+            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            conn.event_loop(events, writes_rx, reads_rx, shutdown_rx)
+            conn.event_loop(stream_events, writes_rx, reads_rx, shutdown_rx)
                 .await
         });
 
