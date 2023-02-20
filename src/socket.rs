@@ -215,7 +215,8 @@ where
         );
 
         match connected_rx.await {
-            Ok(..) => Ok(stream),
+            Ok(Ok(..)) => Ok(stream),
+            Ok(Err(err)) => Err(err),
             Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
     }
@@ -224,7 +225,7 @@ where
         if self.conns.read().unwrap().contains_key(&cid) {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("connection ID in use"),
+                "connection ID in use".to_string(),
             ));
         }
 
@@ -245,7 +246,8 @@ where
         );
 
         match connected_rx.await {
-            Ok(..) => Ok(stream),
+            Ok(Ok(..)) => Ok(stream),
+            Ok(Err(err)) => Err(err),
             Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
     }
