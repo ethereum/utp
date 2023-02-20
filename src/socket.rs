@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
-use crate::event::StreamEvent;
+use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
@@ -22,7 +22,7 @@ pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
-    outgoing: mpsc::UnboundedSender<(Packet, P)>,
+    socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
 }
 
 impl UtpSocket<SocketAddr> {
@@ -51,14 +51,14 @@ where
 
         let mut incoming_conns = HashMap::new();
 
-        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+        let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
         let utp = Self {
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
-            outgoing: outgoing_tx.clone(),
+            socket_events: socket_event_tx.clone(),
         };
 
         let socket = Arc::new(socket);
@@ -102,7 +102,7 @@ where
                                             cid,
                                             ConnectionConfig::default(),
                                             Some(packet),
-                                            outgoing_tx.clone(),
+                                            socket_event_tx.clone(),
                                             events_rx,
                                             connected_tx
                                         );
@@ -117,9 +117,16 @@ where
                             },
                         }
                     }
-                    Some((outgoing, dst)) = outgoing_rx.recv() => {
-                        let encoded = outgoing.encode();
-                        let _ = socket.send_to(&encoded, &dst).await;
+                    Some(event) = socket_event_rx.recv() => {
+                        match event {
+                            SocketEvent::Outgoing((packet, dst)) => {
+                                let encoded = packet.encode();
+                                let _ = socket.send_to(&encoded, &dst).await;
+                            }
+                            SocketEvent::Shutdown(cid) => {
+                                conns.write().unwrap().remove(&cid);
+                            }
+                        }
                     }
                     Some((accept, cid)) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (cid, syn) = match cid {
@@ -158,7 +165,7 @@ where
                             cid,
                             ConnectionConfig::default(),
                             Some(syn),
-                            outgoing_tx.clone(),
+                            socket_event_tx.clone(),
                             events_rx,
                             connected_tx,
                         );
@@ -209,7 +216,7 @@ where
             cid,
             ConnectionConfig::default(),
             None,
-            self.outgoing.clone(),
+            self.socket_events.clone(),
             events_rx,
             connected_tx,
         );
@@ -240,7 +247,7 @@ where
             cid,
             ConnectionConfig::default(),
             None,
-            self.outgoing.clone(),
+            self.socket_events.clone(),
             events_rx,
             connected_tx,
         );
