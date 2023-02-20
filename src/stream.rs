@@ -62,7 +62,7 @@ where
             let (tx, rx) = oneshot::channel();
             self.reads
                 .send((buf.capacity(), tx))
-                .map_err(|_| io::Error::from(io::ErrorKind::Interrupted))?;
+                .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
 
             match rx.await {
                 Ok(result) => match result {
@@ -79,7 +79,7 @@ where
                     }
                     Err(err) => return Err(err),
                 },
-                Err(..) => return Err(io::Error::from(io::ErrorKind::Interrupted)),
+                Err(err) => return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
             }
         }
     }
@@ -92,11 +92,11 @@ where
         let (tx, rx) = oneshot::channel();
         self.writes
             .send((buf.to_vec(), tx))
-            .map_err(|_| io::Error::from(io::ErrorKind::Interrupted))?;
+            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
 
         match rx.await {
             Ok(n) => Ok(n?),
-            Err(..) => Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Err(err) => Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
         }
     }
 }
