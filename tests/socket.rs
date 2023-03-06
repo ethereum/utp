@@ -35,8 +35,8 @@ async fn socket() {
         let mut stream = recv_arc.accept_with_cid(recv_one_cid).await.unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-
         tracing::info!(cid.send = %recv_one_cid.send, cid.recv = %recv_one_cid.recv, "read {n} bytes from uTP stream");
+
         assert_eq!(n, data_one_recv.len());
         assert_eq!(buf, data_one_recv);
     });
@@ -68,8 +68,8 @@ async fn socket() {
         let mut stream = recv.accept_with_cid(recv_two_cid).await.unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-
         tracing::info!(cid.send = %recv_two_cid.send, cid.recv = %recv_two_cid.recv, "read {n} bytes from uTP stream");
+
         assert_eq!(n, data_two_recv.len());
         assert_eq!(buf, data_two_recv);
     });
