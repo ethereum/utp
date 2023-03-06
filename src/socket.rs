@@ -138,7 +138,7 @@ where
                                     (cid, syn)
                                 } else {
                                     awaiting.write().unwrap().insert(cid, accept);
-                                    return;
+                                    continue;
                                 }
                             }
                             // If a CID was not given, then pull an incoming connection, and use
