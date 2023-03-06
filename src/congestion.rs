@@ -103,7 +103,10 @@ impl Controller {
 
     /// Returns the number of bytes available in the congestion window.
     pub fn bytes_available_in_window(&self) -> u32 {
-        self.max_window_size_bytes - self.window_size_bytes
+        // Use saturating arithmetic because the max window (capacity) may drop below the current
+        // window (data in flight).
+        self.max_window_size_bytes
+            .saturating_sub(self.window_size_bytes)
     }
 
     /// Registers the transmission of a packet with the controller.
@@ -265,16 +268,18 @@ impl Controller {
     /// configured maximum increment.
     fn apply_max_window_size_adjustment(&mut self, adjustment: i64) {
         // Apply the adjustment.
-        let max_window_size_bytes = i64::from(self.max_window_size_bytes) + adjustment;
+        let adj_max_window_size_bytes = i64::from(self.max_window_size_bytes) + adjustment;
 
-        // The maximum congestion window must be non-negative.
-        let max_window_size_bytes = cmp::max(max_window_size_bytes, 0) as u32;
+        // The maximum congestion window must not fall below the minimum.
+        let adj_max_window_size_bytes =
+            cmp::max(adj_max_window_size_bytes as u32, self.min_window_size_bytes);
 
         // The maximum congestion window cannot increase by more than the configured maximum
         // increment.
         self.max_window_size_bytes = cmp::min(
-            max_window_size_bytes,
-            self.max_window_size_bytes + self.max_window_size_inc_bytes,
+            adj_max_window_size_bytes,
+            self.max_window_size_bytes
+                .saturating_add(self.max_window_size_inc_bytes),
         );
     }
 
