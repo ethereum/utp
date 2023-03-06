@@ -1,6 +1,7 @@
 use std::io;
 
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::conn;
@@ -38,6 +39,7 @@ where
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             conn.event_loop(stream_events, writes_rx, reads_rx, shutdown_rx)
+                .instrument(tracing::info_span!("uTP", send = cid.send, recv = cid.recv))
                 .await
         });
 

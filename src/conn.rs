@@ -156,6 +156,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
     ) {
+        tracing::info!("uTP conn starting...");
+
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.
         match self.endpoint {
@@ -189,7 +191,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     }
                 }
                 Some(Ok(timeout)) = self.unacked.next() => {
-                    let (.., packet) = timeout;
+                    let (seq, packet) = timeout;
+                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
                     self.on_timeout(packet, Instant::now());
                 }
                 Some(write) = writes.recv(), if !shutting_down => {
@@ -205,6 +208,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     self.process_writes(Instant::now());
                 }
                 _ = &mut shutdown, if !shutting_down => {
+                    tracing::info!("uTP conn initiating shutdown...");
                     shutting_down = true;
                 }
             }
@@ -213,12 +217,19 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 self.shutdown();
             }
 
-            if std::matches!(self.state, State::Closed { .. }) {
+            if let State::Closed { err } = self.state {
+                tracing::info!(?err, "uTP conn closing...");
+
                 self.process_reads();
                 self.process_writes(Instant::now());
-                let _ = self
+
+                if let Err(..) = self
                     .socket_events
-                    .send(SocketEvent::Shutdown(self.cid.clone()));
+                    .send(SocketEvent::Shutdown(self.cid.clone()))
+                {
+                    tracing::warn!("unable to send shutdown signal to uTP socket");
+                }
+
                 break;
             }
         }
@@ -815,6 +826,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn on_reset(&mut self) {
+        tracing::warn!("RESET from remote");
+
         // If the connection is not already closed or reset, then reset the connection.
         if !std::matches!(self.state, State::Closed { .. }) {
             self.reset(Error::Reset);
