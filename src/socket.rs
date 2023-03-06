@@ -70,6 +70,7 @@ where
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
+                                tracing::warn!(?src, "unable to decode uTP packet");
                                 continue;
                             }
                         };
@@ -113,6 +114,14 @@ where
                                     } else {
                                         incoming_conns.insert(cid, packet);
                                     }
+                                } else {
+                                    tracing::warn!(
+                                        cid = %packet.conn_id(),
+                                        packet = ?packet.packet_type(),
+                                        seq = %packet.seq_num(),
+                                        ack = %packet.ack_num(),
+                                        "received uTP packet for non-existing conn"
+                                    );
                                 }
                             },
                         }
@@ -121,9 +130,19 @@ where
                         match event {
                             SocketEvent::Outgoing((packet, dst)) => {
                                 let encoded = packet.encode();
-                                let _ = socket.send_to(&encoded, &dst).await;
+                                if let Err(err) = socket.send_to(&encoded, &dst).await {
+                                    tracing::warn!(
+                                        %err,
+                                        cid = %packet.conn_id(),
+                                        packet = ?packet.packet_type(),
+                                        seq = %packet.seq_num(),
+                                        ack = %packet.ack_num(),
+                                        "unable to send uTP packet over socket"
+                                    );
+                                }
                             }
                             SocketEvent::Shutdown(cid) => {
+                                tracing::info!(%cid.send, %cid.recv, "uTP conn shutdown");
                                 conns.write().unwrap().remove(&cid);
                             }
                         }
