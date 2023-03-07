@@ -51,8 +51,8 @@ where
         }
     }
 
-    pub fn peer(&self) -> &P {
-        &self.cid.peer
+    pub fn cid(&self) -> &ConnectionId<P> {
+        &self.cid
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {

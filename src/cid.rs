@@ -16,7 +16,7 @@ pub struct ConnectionId<P> {
 }
 
 pub trait ConnectionIdGenerator<P> {
-    fn cid(&mut self, peer: P) -> ConnectionId<P>;
+    fn cid(&mut self, peer: P, is_initiator: bool) -> ConnectionId<P>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,10 +33,14 @@ impl<P> StdConnectionIdGenerator<P> {
 }
 
 impl<P: ConnectionPeer> ConnectionIdGenerator<P> for StdConnectionIdGenerator<P> {
-    fn cid(&mut self, peer: P) -> ConnectionId<P> {
+    fn cid(&mut self, peer: P, is_initiator: bool) -> ConnectionId<P> {
         loop {
             let recv: u16 = rand::random();
-            let send = recv.wrapping_add(1);
+            let send = if is_initiator {
+                recv.wrapping_add(1)
+            } else {
+                recv.wrapping_sub(1)
+            };
             let cid = ConnectionId {
                 send,
                 recv,
