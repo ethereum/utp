@@ -200,6 +200,10 @@ where
         utp
     }
 
+    pub fn cid(&self, peer: P, is_initiator: bool) -> ConnectionId<P> {
+        self.cid_gen.lock().unwrap().cid(peer, is_initiator)
+    }
+
     pub async fn accept(&self) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         self.accepts
@@ -223,7 +227,7 @@ where
     }
 
     pub async fn connect(&self, peer: P) -> io::Result<UtpStream<P>> {
-        let cid = self.cid_gen.lock().unwrap().cid(peer);
+        let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -251,7 +255,7 @@ where
         if self.conns.read().unwrap().contains_key(&cid) {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "connection ID in use".to_string(),
+                "connection ID unavailable".to_string(),
             ));
         }
 
