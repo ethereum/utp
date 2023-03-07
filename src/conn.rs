@@ -14,6 +14,7 @@ use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
 use crate::sent::SentPackets;
+use crate::seq::CircularRangeInclusive;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
@@ -71,14 +72,16 @@ pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 pub struct ConnectionConfig {
     pub max_packet_size: u16,
     pub max_conn_attempts: usize,
+    pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
 }
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            max_packet_size: 2048,
+            max_packet_size: 1024,
             max_conn_attempts: 3,
+            max_idle_timeout: Duration::from_secs(10),
             initial_timeout: Duration::from_millis(500),
         }
     }
@@ -171,20 +174,55 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
                 self.endpoint = Endpoint::Initiator((syn_seq_num, 1));
             }
-            Endpoint::Acceptor(..) => {
+            Endpoint::Acceptor((syn, syn_ack)) => {
                 let state = self.state_packet().unwrap();
                 self.socket_events
                     .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
                     .unwrap();
+
+                let recv_buf = ReceiveBuffer::new(syn);
+                let send_buf = SendBuffer::new();
+
+                let congestion_ctrl = congestion::Controller::new(self.config.into());
+
+                // NOTE: In a deviation from the specification, we do not increment the sequence
+                // number following the SYN-ACK, because the initiating endpoint initializes its
+                // ACK number to the sequence number minus 1.
+                let sent_packets = SentPackets::new(syn_ack.wrapping_sub(1), congestion_ctrl);
+
+                // The connection must be in the `Connecting` state. We optimistically mark the
+                // connection `Established` here. This enables the accepting endpoint to send DATA
+                // packets before receiving any from the initiator.
+                //
+                // TODO: Find a more elegant way to emit the connected message.
+                if let State::Connecting(connected) = &mut self.state {
+                    let _ = connected.take().unwrap().send(Ok(()));
+                } else {
+                    panic!("connection in invalid state prior to event loop beginning");
+                }
+
+                self.state = State::Established {
+                    recv_buf,
+                    send_buf,
+                    sent_packets,
+                };
             }
         }
 
         let mut shutting_down = false;
+        let idle_timeout = tokio::time::sleep(self.config.max_idle_timeout);
+        tokio::pin!(idle_timeout);
         loop {
             tokio::select! {
                 Some(event) = stream_events.recv() => {
                     match event {
-                        StreamEvent::Incoming(packet) => self.on_packet(&packet, Instant::now()),
+                        StreamEvent::Incoming(packet) => {
+                            // Reset the idle timeout on any incoming packet.
+                            let idle_deadline = tokio::time::Instant::now() + self.config.max_idle_timeout;
+                            idle_timeout.as_mut().reset(idle_deadline);
+
+                            self.on_packet(&packet, Instant::now());
+                        }
                         StreamEvent::Shutdown => {
                             shutting_down = true;
                         }
@@ -193,9 +231,14 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 Some(Ok(timeout)) = self.unacked.next() => {
                     let (seq, packet) = timeout;
                     tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
+
                     self.on_timeout(packet, Instant::now());
                 }
                 Some(write) = writes.recv(), if !shutting_down => {
+                    // Reset the idle timeout on any new write.
+                    let idle_deadline = tokio::time::Instant::now() + self.config.max_idle_timeout;
+                    idle_timeout.as_mut().reset(idle_deadline);
+
                     self.on_write(write);
                 }
                 Some(read) = reads.recv() => {
@@ -206,6 +249,14 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 _ = self.writable.notified() => {
                     self.process_writes(Instant::now());
+                }
+                () = &mut idle_timeout => {
+                    if !std::matches!(self.state, State::Closed { .. }) {
+                        let unacked: Vec<u16> = self.unacked.keys().copied().collect();
+                        tracing::warn!(?unacked, "idle timeout expired, closing...");
+
+                        self.state = State::Closed { err: Some(Error::TimedOut) };
+                    }
                 }
                 _ = &mut shutdown, if !shutting_down => {
                     tracing::info!("uTP conn initiating shutdown...");
@@ -264,9 +315,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     .build();
 
                     local_fin = Some(seq_num);
-                    let _ = self
-                        .socket_events
-                        .send(SocketEvent::Outgoing((fin, self.cid.peer.clone())));
+
+                    tracing::debug!(seq = %seq_num, "transmitting FIN");
+                    Self::transmit(
+                        sent_packets,
+                        &mut self.unacked,
+                        &mut self.socket_events,
+                        fin,
+                        &self.cid.peer,
+                        Instant::now(),
+                    );
                 }
 
                 self.state = State::Closing {
@@ -284,6 +342,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 local_fin,
                 ..
             } => {
+                // If we have not sent our FIN, and there are no pending writes, and there is no
+                // pending data in the send buffer, then send our FIN. If there were still data to
+                // send, then we would not know which sequence number to assign to our FIN.
                 if local_fin.is_none() && self.pending_writes.is_empty() && send_buf.is_empty() {
                     // TODO: Helper for construction of FIN.
                     let recv_window = recv_buf.available() as u32;
@@ -302,9 +363,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     .build();
 
                     *local_fin = Some(seq_num);
-                    let _ = self
-                        .socket_events
-                        .send(SocketEvent::Outgoing((fin, self.cid.peer.clone())));
+
+                    tracing::debug!(seq = %seq_num, "transmitting FIN");
+                    Self::transmit(
+                        sent_packets,
+                        &mut self.unacked,
+                        &mut self.socket_events,
+                        fin,
+                        &self.cid.peer,
+                        Instant::now(),
+                    );
                 }
             }
             State::Closed { .. } => {}
@@ -539,6 +607,12 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 recv_buf,
                 ..
             } => {
+                // If the timed out packet is a SYN, then do nothing since the connection has
+                // already been established.
+                if std::matches!(packet.packet_type(), PacketType::Syn) {
+                    return;
+                }
+
                 sent_packets.on_timeout();
 
                 // TODO: Limit number of retransmissions.
@@ -569,10 +643,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
-        // TODO: We probably ought to cap the diff here. If the clock on the remote machine is
-        // behind the clock on the local machine, then we could end up with large (inaccurate)
-        // diffs.
-        self.peer_ts_diff = crate::time::duration_between(packet.ts_micros(), now_micros);
+        // Cap the diff. If the clock on the remote machine is behind the clock on the local
+        // machine, then we could end up with large (inaccurate) diffs. Use the max idle timeout as
+        // an upper bound on the possible diff. If the diff exceeds the bound, then assume the
+        // remote clock is behind the local clock and use a diff of 1s.
+        let peer_ts_diff = crate::time::duration_between(packet.ts_micros(), now_micros);
+        if peer_ts_diff > self.config.max_idle_timeout {
+            self.peer_ts_diff = Duration::from_secs(1);
+        } else {
+            self.peer_ts_diff = peer_ts_diff;
+        }
 
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
@@ -602,11 +682,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         // If there are any lost packets, then queue retransmissions.
         self.retransmit_lost_packets(now);
 
-        // TODO: If the connection is ready to be closed, then close the connection.
-
         // Send a STATE packet if appropriate packet and connection in appropriate state.
         //
         // NOTE: We don't call `transmit` because we do not wish to track this packet.
+        // NOTE: We should probably move this so that multiple incoming packets can be processed
+        // before we send a STATE.
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
@@ -624,10 +704,25 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             self.writable.notify_one();
         }
 
-        // If the packet contains a data payload, then notify readable because there may be new
-        // data available in the receive buffer.
-        if !packet.payload().is_empty() {
+        // If the packet contains a data payload, or the packet was a FIN, then notify readable
+        // because there may be new data available in the receive buffer and/or reads to complete.
+        if !packet.payload().is_empty() || std::matches!(packet.packet_type(), PacketType::Fin) {
             self.readable.notify_one();
+        }
+
+        // If both endpoints have exchanged FINs and all data has been received/acknowledged, then
+        // close the connection.
+        if let State::Closing {
+            local_fin: Some(..),
+            remote_fin: Some(remote),
+            sent_packets,
+            recv_buf,
+            ..
+        } = &mut self.state
+        {
+            if !sent_packets.has_unacked_packets() && recv_buf.ack_num() == *remote {
+                self.state = State::Closed { err: None };
+            }
         }
     }
 
@@ -685,12 +780,20 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
                 let range = sent_packets.seq_num_range();
                 if range.contains(ack_num) {
-                    sent_packets.on_ack(ack_num, selective_ack, delay, now);
-                    self.unacked.remove(&ack_num);
+                    // Do not ACK if ACK num corresponds to initial packet.
+                    if ack_num != range.start() {
+                        sent_packets.on_ack(ack_num, selective_ack, delay, now);
+                    }
+
+                    // Mark all packets up to `ack_num` acknowledged by retaining all packets in
+                    // the range beyond `ack_num`.
+                    let acked = CircularRangeInclusive::new(range.start(), ack_num);
+                    self.unacked.retain(|seq, _| !acked.contains(*seq));
+
                     // TODO: Helper for selective ACK.
                     if let Some(selective_ack) = selective_ack {
                         for (i, acked) in selective_ack.acked().iter().enumerate() {
-                            let seq_num = (usize::from(ack_num) + 2 + i) as u16;
+                            let seq_num = usize::from(ack_num).wrapping_add(2 + i) as u16;
                             if *acked {
                                 self.unacked.remove(&seq_num);
                             }
@@ -712,27 +815,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         match &mut self.state {
-            State::Connecting(connected) => match self.endpoint {
-                // If we are the accepting endpoint, and the sequence number corresponds to the
-                // sequence number after the SYN, then mark the connection established.
-                Endpoint::Acceptor((syn, syn_ack)) => {
-                    if seq_num == syn.wrapping_add(1) {
-                        let mut recv_buf = ReceiveBuffer::new(syn);
-                        recv_buf.write(data, seq_num);
-
-                        let send_buf = SendBuffer::new();
-
-                        let congestion_ctrl = congestion::Controller::new(self.config.into());
-                        let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
-
-                        let _ = connected.take().unwrap().send(Ok(()));
-                        self.state = State::Established {
-                            recv_buf,
-                            send_buf,
-                            sent_packets,
-                        };
-                    }
-                }
+            State::Connecting(..) => match self.endpoint {
+                // If we are the accepting endpoint, then the connection should have been marked
+                // `Established` at the beginning of the event loop.
+                // TODO: Clean this up so that we do not have to rely on `unreachable`.
+                Endpoint::Acceptor(..) => unreachable!(),
                 // If we are the initiating endpoint, then we cannot mark the connection
                 // established, because we are waiting on the STATE for the SYN. Without the STATE,
                 // we do not know how to order this data.
@@ -784,11 +871,14 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 sent_packets,
                 send_buf,
             } => {
+                // Register the FIN with the receive buffer.
                 if let Some(data) = data {
                     recv_buf.write(data, seq_num);
                 } else {
                     recv_buf.write(&[], seq_num);
                 }
+
+                tracing::debug!(seq = %seq_num, "received FIN");
 
                 self.state = State::Closing {
                     recv_buf: recv_buf.clone(),
@@ -812,6 +902,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         }
                     }
                     None => {
+                        tracing::debug!(seq = %seq_num, "received FIN");
+
                         *remote_fin = Some(seq_num);
                         if let Some(data) = data {
                             recv_buf.write(data, seq_num);
@@ -1101,20 +1193,6 @@ mod test {
                 err: Some(Error::InvalidAckNum),
             }
         ));
-    }
-
-    #[test]
-    fn on_data_connecting_acceptor() {
-        let syn = 100;
-        let syn_ack = 101;
-        let endpoint = Endpoint::Acceptor((syn, syn_ack));
-        let mut conn = conn(endpoint);
-
-        let seq_num = syn.wrapping_add(1);
-        let data = vec![0xef];
-        conn.on_data(seq_num, &data);
-
-        assert!(std::matches!(conn.state, State::Established { .. }));
     }
 
     #[test]
