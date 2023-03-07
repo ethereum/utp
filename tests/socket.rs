@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use utp::cid;
-use utp::socket::UtpSocket;
+use utp_rs::cid;
+use utp_rs::socket::UtpSocket;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn socket() {

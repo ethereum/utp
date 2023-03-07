@@ -1,7 +1,14 @@
 [package]
-name = "utp"
+name = "utp-rs"
 version = "0.1.0-alpha"
 edition = "2021"
+authors = ["Jacob Kaufmann"]
+description = "uTorrent transport protocol"
+readme = "README.md"
+repository = "https://github.com/jacobkaufmann/utp/"
+license = "MIT"
+keywords = ["utp"]
+categories = ["network programming"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
