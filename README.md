@@ -6,7 +6,6 @@ A Rust library for the [uTorrent transport protocol (uTP)](https://www.bittorren
 ```rust
 use std::net::SocketAddr;
 
-use utp_rs::cid;
 use utp_rs::socket::UtpSocket;
 use utp_rs::udp::AsyncUdpSocket;
 
