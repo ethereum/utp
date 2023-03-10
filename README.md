@@ -1,2 +1,40 @@
 # utp
 A Rust library for the [uTorrent transport protocol (uTP)](https://www.bittorrent.org/beps/bep_0029.html).
+
+# Usage
+
+```rust
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use utp_rs::cid;
+use utp_rs::socket::UtpSocket;
+use utp_rs::udp::AsyncUdpSocket;
+
+#[tokio::main]
+fn main() {
+	// bind a standard UDP socket
+	let socket_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
+	let udp_socket = UtpSocket::bind(socket_addr).await.unwrap();
+
+	// bind a custom UDP socket. here we assume `CustomSocket` implements `AsyncUdpSocket`.
+	let async_udp_socket = CustomSocket::new(..);
+	let custom_socket = UtpSocket::with_socket(async_udp_socket).await.unwrap();
+
+	// connect to a remote peer over uTP.
+	let remote = SocketAddr::from(..);
+	let mut stream = udp_socket::connect(remote).await.unwrap();
+
+	// write data to the remote peer over the stream.
+	let data = vec![0xef; 2048];
+	let n = stream.write(data.as_slice()).await.unwrap();
+
+	// accept a connection from a remote peer.
+	let stream = udp_socket.accept().await;
+
+	// read data from the remote peer until the peer indicates there is no data left to write.
+	let mut data = vec![];
+	let n = stream.read_to_eof(&mut data).await.unwrap();
+}
+```
+
