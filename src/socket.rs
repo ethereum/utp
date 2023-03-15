@@ -14,7 +14,11 @@ use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
 
 type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
-type Accept<P> = oneshot::Sender<io::Result<UtpStream<P>>>;
+
+struct Accept<P> {
+    stream: oneshot::Sender<io::Result<UtpStream<P>>>,
+    config: ConnectionConfig,
+}
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
@@ -101,7 +105,7 @@ where
 
                                         let stream = UtpStream::new(
                                             cid,
-                                            ConnectionConfig::default(),
+                                            accept.config,
                                             Some(packet),
                                             socket_event_tx.clone(),
                                             events_rx,
@@ -182,7 +186,7 @@ where
 
                         let stream = UtpStream::new(
                             cid,
-                            ConnectionConfig::default(),
+                            accept.config,
                             Some(syn),
                             socket_event_tx.clone(),
                             events_rx,
@@ -204,10 +208,14 @@ where
         self.cid_gen.lock().unwrap().cid(peer, is_initiator)
     }
 
-    pub async fn accept(&self) -> io::Result<UtpStream<P>> {
+    pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
+        let accept = Accept {
+            stream: stream_tx,
+            config,
+        };
         self.accepts
-            .send((stream_tx, None))
+            .send((accept, None))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
@@ -215,10 +223,18 @@ where
         }
     }
 
-    pub async fn accept_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
+    pub async fn accept_with_cid(
+        &self,
+        cid: ConnectionId<P>,
+        config: ConnectionConfig,
+    ) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
+        let accept = Accept {
+            stream: stream_tx,
+            config,
+        };
         self.accepts
-            .send((stream_tx, Some(cid)))
+            .send((accept, Some(cid)))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
@@ -226,7 +242,7 @@ where
         }
     }
 
-    pub async fn connect(&self, peer: P) -> io::Result<UtpStream<P>> {
+    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -237,7 +253,7 @@ where
 
         let stream = UtpStream::new(
             cid,
-            ConnectionConfig::default(),
+            config,
             None,
             self.socket_events.clone(),
             events_rx,
@@ -251,7 +267,11 @@ where
         }
     }
 
-    pub async fn connect_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
+    pub async fn connect_with_cid(
+        &self,
+        cid: ConnectionId<P>,
+        config: ConnectionConfig,
+    ) -> io::Result<UtpStream<P>> {
         if self.conns.read().unwrap().contains_key(&cid) {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -268,7 +288,7 @@ where
 
         let stream = UtpStream::new(
             cid,
-            ConnectionConfig::default(),
+            config,
             None,
             self.socket_events.clone(),
             events_rx,
@@ -289,13 +309,15 @@ where
     ) {
         match connected.await {
             Ok(Ok(..)) => {
-                let _ = accept.send(Ok(stream));
+                let _ = accept.stream.send(Ok(stream));
             }
             Ok(Err(err)) => {
-                let _ = accept.send(Err(err));
+                let _ = accept.stream.send(Err(err));
             }
             Err(..) => {
-                let _ = accept.send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
+                let _ = accept
+                    .stream
+                    .send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
             }
         }
     }

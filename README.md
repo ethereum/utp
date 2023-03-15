@@ -6,6 +6,7 @@ A Rust library for the [uTorrent transport protocol (uTP)](https://www.bittorren
 ```rust
 use std::net::SocketAddr;
 
+use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 use utp_rs::udp::AsyncUdpSocket;
 
@@ -21,14 +22,16 @@ fn main() {
 
 	// connect to a remote peer over uTP.
 	let remote = SocketAddr::from(..);
-	let mut stream = udp_socket::connect(remote).await.unwrap();
+	let config = ConnectionConfig::default();
+	let mut stream = udp_socket::connect(remote, config).await.unwrap();
 
 	// write data to the remote peer over the stream.
 	let data = vec![0xef; 2048];
 	let n = stream.write(data.as_slice()).await.unwrap();
 
 	// accept a connection from a remote peer.
-	let stream = udp_socket.accept().await;
+	let config = ConnectionConfig::default();
+	let stream = udp_socket.accept(config).await;
 
 	// read data from the remote peer until the peer indicates there is no data left to write.
 	let mut data = vec![];
