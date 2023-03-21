@@ -2,10 +2,10 @@ use std::cmp;
 use std::collections::{BinaryHeap, HashMap};
 use std::time::{Duration, Instant};
 
-const DEFAULT_TARGET_MICROS: u32 = 100_000;
-const DEFAULT_INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
-const DEFAULT_MIN_TIMEOUT: Duration = Duration::from_millis(500);
-const DEFAULT_MAX_PACKET_SIZE_BYTES: u32 = 2048;
+pub(crate) const DEFAULT_TARGET_MICROS: u32 = 100_000;
+pub(crate) const DEFAULT_INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const DEFAULT_MIN_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const DEFAULT_MAX_PACKET_SIZE_BYTES: u32 = 1024;
 const DEFAULT_GAIN: f32 = 1.0;
 const DEFAULT_DELAY_WINDOW: Duration = Duration::from_secs(120);
 
