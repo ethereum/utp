@@ -1,5 +1,6 @@
 use std::cmp;
 use std::collections::VecDeque;
+use std::fmt;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,25 @@ enum Error {
     Reset,
     SynFromAcceptor,
     TimedOut,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::EmptyDataPayload => "missing payload in DATA packet",
+            Self::InvalidAckNum => "received ACK for unsent packet",
+            Self::InvalidFin => "received multiple FIN packets with distinct sequence numbers",
+            Self::InvalidSeqNum => {
+                "received packet with sequence number outside of remote peer's [SYN,FIN] range"
+            }
+            Self::InvalidSyn => "received multiple SYN packets with distinct sequence numbers",
+            Self::Reset => "received RESET packet from remote peer",
+            Self::SynFromAcceptor => "received SYN packet from connection acceptor",
+            Self::TimedOut => "connection timed out",
+        };
+
+        write!(f, "{s}")
+    }
 }
 
 impl From<Error> for io::ErrorKind {
@@ -934,6 +954,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn reset(&mut self, err: Error) {
+        tracing::warn!(?err, "resetting connection: {err}");
         self.state = State::Closed { err: Some(err) }
     }
 
