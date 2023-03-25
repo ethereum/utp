@@ -119,7 +119,7 @@ where
                                         incoming_conns.insert(cid, packet);
                                     }
                                 } else {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         cid = %packet.conn_id(),
                                         packet = ?packet.packet_type(),
                                         seq = %packet.seq_num(),
@@ -135,7 +135,7 @@ where
                             SocketEvent::Outgoing((packet, dst)) => {
                                 let encoded = packet.encode();
                                 if let Err(err) = socket.send_to(&encoded, &dst).await {
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         %err,
                                         cid = %packet.conn_id(),
                                         packet = ?packet.packet_type(),
@@ -146,7 +146,7 @@ where
                                 }
                             }
                             SocketEvent::Shutdown(cid) => {
-                                tracing::info!(%cid.send, %cid.recv, "uTP conn shutdown");
+                                tracing::debug!(%cid.send, %cid.recv, "uTP conn shutdown");
                                 conns.write().unwrap().remove(&cid);
                             }
                         }

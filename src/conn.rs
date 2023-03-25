@@ -166,7 +166,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
     ) {
-        tracing::info!("uTP conn starting...");
+        tracing::debug!("uTP conn starting...");
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.
@@ -266,7 +266,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
-                    tracing::info!("uTP conn initiating shutdown...");
+                    tracing::debug!("uTP conn initiating shutdown...");
                     shutting_down = true;
                 }
             }
@@ -276,7 +276,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
 
             if let State::Closed { err } = self.state {
-                tracing::info!(?err, "uTP conn closing...");
+                tracing::debug!(?err, "uTP conn closing...");
 
                 self.process_reads();
                 self.process_writes(Instant::now());
