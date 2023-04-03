@@ -212,9 +212,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
                 let congestion_ctrl = congestion::Controller::new(self.config.into());
 
-                // NOTE: In a deviation from the specification, we do not increment the sequence
-                // number following the SYN-ACK, because the initiating endpoint initializes its
-                // ACK number to the sequence number minus 1.
+                // NOTE: We initialize with the sequence number of the SYN-ACK minus 1 because the
+                // SYN-ACK contains the incremented sequence number (i.e. the next sequence
+                // number). This is consistent with the reference implementation and the libtorrent
+                // implementation where STATE packets set the sequence number to the next sequence
+                // number.
                 let sent_packets = SentPackets::new(syn_ack.wrapping_sub(1), congestion_ctrl);
 
                 // The connection must be in the `Connecting` state. We optimistically mark the
@@ -788,7 +790,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 // If the STATE acknowledges our SYN, then mark the connection established.
                 Endpoint::Initiator((syn, ..)) => {
                     if ack_num == syn {
-                        let recv_buf = ReceiveBuffer::new(seq_num);
+                        // NOTE: In a deviation from the specification, we initialize the ACK num
+                        // to the sequence number of the SYN-ACK minus 1. This is consistent with
+                        // the reference implementation and the libtorrent implementation.
+                        let recv_buf = ReceiveBuffer::new(seq_num.wrapping_sub(1));
+
                         let send_buf = SendBuffer::new();
 
                         let congestion_ctrl = congestion::Controller::new(self.config.into());
@@ -997,7 +1003,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 sent_packets,
                 ..
             } => {
-                let seq_num = sent_packets.seq_num_range().end();
+                // NOTE: Consistent with the reference implementation and the libtorrent
+                // implementation, STATE packets always include the next sequence number.
+                let seq_num = sent_packets.next_seq_num();
                 let ack_num = recv_buf.ack_num();
                 let recv_window = recv_buf.available() as u32;
                 let selective_ack = recv_buf.selective_ack();
