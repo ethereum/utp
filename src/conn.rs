@@ -788,7 +788,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 // If the STATE acknowledges our SYN, then mark the connection established.
                 Endpoint::Initiator((syn, ..)) => {
                     if ack_num == syn {
-                        let recv_buf = ReceiveBuffer::new(seq_num);
+                        let recv_buf = ReceiveBuffer::new(seq_num.wrapping_sub(1));
                         let send_buf = SendBuffer::new();
 
                         let congestion_ctrl = congestion::Controller::new(self.config.into());
