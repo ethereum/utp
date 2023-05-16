@@ -28,7 +28,7 @@ pub enum Error {
     #[error("idle timeout, uTP connection abort")]
     ConnectionAbort,
     #[error("opening uTP connection failed, {0}")]
-    ConnInitError(#[from] conn::Error),
+    ConnInit(#[from] conn::Error),
     #[error("nonexistent connection id")]
     NonExistentConnId,
     #[error("notify channel failed, {0}")]
