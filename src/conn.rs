@@ -1,11 +1,11 @@
 use std::cmp;
 use std::collections::VecDeque;
-use std::fmt;
 use std::io;
 use std::time::{Duration, Instant};
 
 use delay_map::HashMapDelay;
 use futures::StreamExt;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::cid::{ConnectionId, ConnectionPeer};
@@ -17,47 +17,32 @@ use crate::send::SendBuffer;
 use crate::sent::SentPackets;
 use crate::seq::CircularRangeInclusive;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Error {
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("io error, {0}")]
+    Io(#[from] io::Error),
+    #[error("missing payload in DATA packet")]
     EmptyDataPayload,
+    #[error("received ACK for unsent packet")]
     InvalidAckNum,
+    #[error("received multiple FIN packets with distinct sequence numbers")]
     InvalidFin,
+    #[error("received packet with sequence number outside of remote peer's [SYN,FIN] range")]
     InvalidSeqNum,
+    #[error("received multiple SYN packets with distinct sequence numbers")]
     InvalidSyn,
+    #[error("received RESET packet from remote peer")]
     Reset,
+    #[error("received SYN packet from uTP connection acceptor")]
     SynFromAcceptor,
-    TimedOut,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::EmptyDataPayload => "missing payload in DATA packet",
-            Self::InvalidAckNum => "received ACK for unsent packet",
-            Self::InvalidFin => "received multiple FIN packets with distinct sequence numbers",
-            Self::InvalidSeqNum => {
-                "received packet with sequence number outside of remote peer's [SYN,FIN] range"
-            }
-            Self::InvalidSyn => "received multiple SYN packets with distinct sequence numbers",
-            Self::Reset => "received RESET packet from remote peer",
-            Self::SynFromAcceptor => "received SYN packet from connection acceptor",
-            Self::TimedOut => "connection timed out",
-        };
-
-        write!(f, "{s}")
-    }
-}
-
-impl From<Error> for io::ErrorKind {
-    fn from(value: Error) -> Self {
-        use Error::*;
-        match value {
-            EmptyDataPayload | InvalidAckNum | InvalidFin | InvalidSeqNum | InvalidSyn
-            | SynFromAcceptor => io::ErrorKind::InvalidData,
-            Reset => io::ErrorKind::ConnectionReset,
-            TimedOut => io::ErrorKind::TimedOut,
-        }
-    }
+    #[error("uTP connection timed out, {0}")]
+    ConnTimeOut(#[from] oneshot::error::RecvError),
+    #[error("idle uTP connection time out")]
+    ConnIdleTimeOut,
+    #[error("uTP connection closed")]
+    ConnClosed(String),
+    #[error("max uTP connection attempts made")]
+    MaxConnAttempts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,7 +52,7 @@ enum Endpoint {
 }
 
 enum State<const N: usize> {
-    Connecting(Option<oneshot::Sender<io::Result<()>>>),
+    Connecting(Option<oneshot::Sender<Result<(), Error>>>),
     Established {
         recv_buf: ReceiveBuffer<N>,
         send_buf: SendBuffer<N>,
@@ -85,8 +70,8 @@ enum State<const N: usize> {
     },
 }
 
-pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
-pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
+pub type Write = (Vec<u8>, oneshot::Sender<Result<usize, Error>>);
+pub type Read = (usize, oneshot::Sender<Result<Vec<u8>, Error>>);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
@@ -143,7 +128,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         cid: ConnectionId<P>,
         config: ConnectionConfig,
         syn: Option<Packet>,
-        connected: oneshot::Sender<io::Result<()>>,
+        notify_conn_open: oneshot::Sender<Result<(), Error>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
@@ -164,7 +149,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         };
 
         Self {
-            state: State::Connecting(Some(connected)),
+            state: State::Connecting(Some(notify_conn_open)),
             cid,
             config,
             endpoint,
@@ -284,7 +269,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         let unacked: Vec<u16> = self.unacked.keys().copied().collect();
                         tracing::warn!(?unacked, "idle timeout expired, closing...");
 
-                        self.state = State::Closed { err: Some(Error::TimedOut) };
+                        self.state = State::Closed { err: Some(Error::ConnIdleTimeOut) };
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
@@ -297,7 +282,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 self.shutdown();
             }
 
-            if let State::Closed { err } = self.state {
+            if let State::Closed { ref err } = self.state {
                 tracing::debug!(?err, "uTP conn closing...");
 
                 self.process_reads();
@@ -424,13 +409,13 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 ..
             } => (send_buf, sent_packets, recv_buf),
             State::Closed { err, .. } => {
-                let result = match err {
-                    Some(err) => Err(io::ErrorKind::from(*err)),
-                    None => Ok(0),
-                };
                 while let Some(pending) = self.pending_writes.pop_front() {
+                    let result = match err {
+                        Some(err) => Err(Error::ConnClosed(format_args!("{err}").to_string())),
+                        None => Ok(0),
+                    };
                     let (.., tx) = pending;
-                    let _ = tx.send(result.map_err(io::Error::from));
+                    let _ = tx.send(result);
                 }
                 return;
             }
@@ -517,7 +502,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
             State::Closed { err, .. } => {
                 let result = match err {
-                    Some(err) => Err(io::Error::from(io::ErrorKind::from(*err))),
+                    Some(err) => Err(Error::ConnClosed(format_args!("{err}").to_string())),
                     None => Ok(0),
                 };
                 let _ = tx.send(result);
@@ -534,13 +519,13 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             State::Connecting(..) => return,
             State::Established { recv_buf, .. } | State::Closing { recv_buf, .. } => recv_buf,
             State::Closed { err } => {
-                let result = match err {
-                    Some(err) => Err(io::ErrorKind::from(*err)),
-                    None => Ok(vec![]),
-                };
                 while let Some(pending) = self.pending_reads.pop_front() {
+                    let result = match err {
+                        Some(err) => Err(Error::ConnClosed(format_args!("{err}").to_string())),
+                        None => Ok(vec![]),
+                    };
                     let (.., tx) = pending;
-                    let _ = tx.send(result.clone().map_err(io::Error::from));
+                    let _ = tx.send(result);
                 }
                 return;
             }
@@ -574,7 +559,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
             State::Closed { err } => {
                 let result = match err {
-                    Some(err) => Err(io::Error::from(io::ErrorKind::from(*err))),
+                    Some(err) => Err(Error::ConnClosed(format_args!("{err}").to_string())),
                     None => Ok(vec![]),
                 };
                 let _ = tx.send(result);
@@ -603,15 +588,15 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
     fn on_timeout(&mut self, packet: Packet, now: Instant) {
         match &mut self.state {
-            State::Connecting(connected) => match &mut self.endpoint {
+            State::Connecting(notify_conn_open) => match &mut self.endpoint {
                 Endpoint::Initiator((syn, attempts)) => {
                     if *attempts >= self.config.max_conn_attempts {
-                        let err = Error::TimedOut;
-                        if let Some(connected) = connected.take() {
-                            let err = io::Error::from(io::ErrorKind::from(err));
-                            let _ = connected.send(Err(err));
+                        if let Some(connected) = notify_conn_open.take() {
+                            let _ = connected.send(Err(Error::MaxConnAttempts));
                         }
-                        self.state = State::Closed { err: Some(err) };
+                        self.state = State::Closed {
+                            err: Some(Error::MaxConnAttempts),
+                        };
                     } else {
                         let seq = *syn;
                         *attempts += 1;
@@ -1095,7 +1080,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 #[cfg(test)]
 mod test {
     use super::*;
-
     use std::net::SocketAddr;
 
     const BUF: usize = 2048;
