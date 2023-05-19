@@ -21,7 +21,7 @@ async fn socket() {
     let mut handles = vec![];
 
     // start 50 transfers, step by two to avoid cid collisions
-    for i in (0..100).step_by(2) {
+    for i in (0..1000).step_by(2) {
         let handle = initiate_transfer(i, recv_addr, recv.clone(), send_addr, send.clone()).await;
         handles.push(handle.0);
         handles.push(handle.1);
