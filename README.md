@@ -1,6 +1,9 @@
 # utp
 A Rust library for the [uTorrent transport protocol (uTP)](https://www.bittorrent.org/beps/bep_0029.html).
 
+## 🚧 WARNING: UNDER CONSTRUCTION 🚧
+This library is currently unstable, with known issues. Use at your own discretion.
+
 # Usage
 
 ```rust
