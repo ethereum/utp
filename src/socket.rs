@@ -262,7 +262,7 @@ where
 
     pub async fn connect(&self, peer: P, config: ConnectionConfig) -> Result<UtpStream<P>, Error> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
-        let (notify_conn_open_tx, notify_conn_open_rx) = oneshot::channel();
+        let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
         {
@@ -275,10 +275,10 @@ where
             None,
             self.socket_events.clone(),
             events_rx,
-            notify_conn_open_tx,
+            connected_tx,
         );
 
-        match notify_conn_open_rx.await? {
+        match connected_rx.await? {
             Ok(..) => Ok(stream),
             Err(err) => Err(err.into()),
         }

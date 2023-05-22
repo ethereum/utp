@@ -128,7 +128,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         cid: ConnectionId<P>,
         config: ConnectionConfig,
         syn: Option<Packet>,
-        notify_conn_open: oneshot::Sender<Result<(), Error>>,
+        connected: oneshot::Sender<Result<(), Error>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
@@ -149,7 +149,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         };
 
         Self {
-            state: State::Connecting(Some(notify_conn_open)),
+            state: State::Connecting(Some(connected)),
             cid,
             config,
             endpoint,
@@ -588,10 +588,10 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
     fn on_timeout(&mut self, packet: Packet, now: Instant) {
         match &mut self.state {
-            State::Connecting(notify_conn_open) => match &mut self.endpoint {
+            State::Connecting(connected) => match &mut self.endpoint {
                 Endpoint::Initiator((syn, attempts)) => {
                     if *attempts >= self.config.max_conn_attempts {
-                        if let Some(connected) = notify_conn_open.take() {
+                        if let Some(connected) = connected.take() {
                             let _ = connected.send(Err(Error::MaxConnAttempts));
                         }
                         self.state = State::Closed {

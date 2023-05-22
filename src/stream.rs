@@ -44,15 +44,10 @@ where
         syn: Option<Packet>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
-        notify_conn_open: oneshot::Sender<Result<(), conn::Error>>,
+        connected: oneshot::Sender<Result<(), conn::Error>>,
     ) -> Self {
-        let mut conn = conn::Connection::<BUF, P>::new(
-            cid.clone(),
-            config,
-            syn,
-            notify_conn_open,
-            socket_events,
-        );
+        let mut conn =
+            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
