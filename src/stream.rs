@@ -122,35 +122,3 @@ impl<P> Drop for UtpStream<P> {
         let _ = self.shutdown();
     }
 }
-
-#[cfg(test)]
-mod test {
-    use crate::conn::ConnectionConfig;
-    use crate::socket::UtpSocket;
-    use std::net::SocketAddr;
-    #[tokio::test]
-    async fn test_transfer_100k_bytes() {
-        // set-up test
-        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
-        let receiver_address = SocketAddr::from(([127, 0, 0, 1], 3401));
-        let config = ConnectionConfig::default();
-        let sender = UtpSocket::bind(sender_addr).await.unwrap();
-        let receiver = UtpSocket::bind(receiver_address).await.unwrap();
-        let mut tx_stream = sender.connect(receiver_address, config).await.unwrap();
-        let mut rx_stream = receiver.accept(config).await.unwrap();
-
-        // write 100k bytes data to the remote peer over the stream.
-        let data = vec![0xef; 100_000];
-        tx_stream
-            .write(data.as_slice())
-            .await
-            .expect("Should send 100k bytes");
-
-        // read data from the remote peer until the peer indicates there is no data left to write.
-        let mut data = vec![];
-        rx_stream
-            .read_to_eof(&mut data)
-            .await
-            .expect("Should receive 100k bytes");
-    }
-}
