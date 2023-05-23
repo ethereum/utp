@@ -165,7 +165,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_transfer_1m_bytes() {
+    async fn test_transfer_1_megabyte() {
         // set-up test
         tracing_subscriber::fmt::init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
@@ -185,7 +185,7 @@ mod test {
             rx_stream
                 .read_to_eof(&mut data)
                 .await
-                .expect("Should read 1m bytes")
+                .expect("Should read 1 megabyte")
         };
 
         let tx = async move {
@@ -195,7 +195,7 @@ mod test {
             tx_stream
                 .write(data.as_slice())
                 .await
-                .expect("Should send 1m bytes")
+                .expect("Should send 1 megabyte")
         };
 
         let (tx_res, rx_res) = tokio::join!(tx, rx);
