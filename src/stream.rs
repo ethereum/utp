@@ -165,7 +165,7 @@ mod test {
         let config = ConnectionConfig::default();
 
         // write 100k bytes data to the remote peer over the stream.
-        let data = vec![0xed; 1000_000];
+        let data = vec![0xed; 1_000_000];
         let rx_handle = tokio::spawn(async move {
             receiver.accept(config).await.unwrap();
         });
