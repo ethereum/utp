@@ -4,32 +4,24 @@ use std::io;
 type Bytes = Vec<u8>;
 
 #[derive(Clone, Debug)]
-pub struct SendBuffer<const N: usize> {
+pub struct SendBuffer {
     pending: VecDeque<Bytes>,
     offset: usize,
 }
 
-impl<const N: usize> Default for SendBuffer<N> {
+impl Default for SendBuffer {
     fn default() -> Self {
-        Self {
-            pending: VecDeque::new(),
-            offset: 0,
-        }
+        Self::new()
     }
 }
 
-impl<const N: usize> SendBuffer<N> {
+impl SendBuffer {
     /// Creates a new buffer.
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
             offset: 0,
         }
-    }
-
-    /// Returns the number of bytes available in the buffer.
-    pub fn available(&self) -> usize {
-        N - self.pending.iter().fold(0, |acc, x| acc + x.len()) + self.offset
     }
 
     /// Returns `true` if the buffer is empty.
@@ -39,14 +31,8 @@ impl<const N: usize> SendBuffer<N> {
 
     /// Writes `data` into the buffer, returning the number of bytes written.
     pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let available = self.available();
-        if data.len() <= available {
-            self.pending.push_back(data.to_vec());
-            Ok(data.len())
-        } else {
-            self.pending.push_back(data[..available].to_vec());
-            Ok(available)
-        }
+        self.pending.push_back(data.to_vec());
+        Ok(data.len())
     }
 
     /// Reads data from the buffer into `buf`, returning the number of bytes read.
@@ -83,36 +69,9 @@ mod test {
     const SIZE: usize = 8192;
 
     #[test]
-    fn available() {
-        let mut buf = SendBuffer::<SIZE>::new();
-        assert_eq!(buf.available(), SIZE);
-
-        const WRITE_LEN: usize = 512;
-        const NUM_WRITES: usize = 3;
-
-        const READ_LEN: usize = 64;
-
-        for _ in 0..NUM_WRITES {
-            let data = vec![0; WRITE_LEN];
-            buf.write(&data).unwrap();
-        }
-        assert_eq!(buf.available(), SIZE - (WRITE_LEN * NUM_WRITES));
-
-        let mut data = vec![0; READ_LEN];
-        buf.read(&mut data).unwrap();
-        assert_eq!(buf.available(), SIZE - (WRITE_LEN * NUM_WRITES) + READ_LEN);
-
-        for _ in 0..NUM_WRITES {
-            let mut data = vec![0; WRITE_LEN];
-            buf.read(&mut data).unwrap();
-        }
-        assert_eq!(buf.available(), SIZE);
-    }
-
-    #[test]
     #[allow(clippy::read_zero_byte_vec)]
     fn read() {
-        let mut buf = SendBuffer::<SIZE>::new();
+        let mut buf = SendBuffer::new();
 
         // Read of empty buffer returns zero.
         let mut read_buf = vec![0; SIZE];
@@ -154,7 +113,7 @@ mod test {
 
     #[test]
     fn write() {
-        let mut buf = SendBuffer::<SIZE>::new();
+        let mut buf = SendBuffer::new();
 
         const WRITE_LEN: usize = 1024;
 

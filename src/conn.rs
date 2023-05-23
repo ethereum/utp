@@ -70,14 +70,14 @@ enum State<const N: usize> {
     Connecting(Option<oneshot::Sender<io::Result<()>>>),
     Established {
         recv_buf: ReceiveBuffer<N>,
-        send_buf: SendBuffer<N>,
+        send_buf: SendBuffer,
         sent_packets: SentPackets,
     },
     Closing {
         local_fin: Option<u16>,
         remote_fin: Option<u16>,
         recv_buf: ReceiveBuffer<N>,
-        send_buf: SendBuffer<N>,
+        send_buf: SendBuffer,
         sent_packets: SentPackets,
     },
     Closed {
@@ -455,15 +455,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         // Write as much data as possible into send buffer.
-        while let Some((data, ..)) = self.pending_writes.front() {
-            if data.len() <= send_buf.available() {
-                let (data, tx) = self.pending_writes.pop_front().unwrap();
-                send_buf.write(&data).unwrap();
-                let _ = tx.send(Ok(data.len()));
-                self.writable.notify_one();
-            } else {
-                break;
-            }
+        while self.pending_writes.front().is_some() {
+            let (data, tx) = self.pending_writes.pop_front().unwrap();
+            send_buf.write(&data).unwrap();
+            let _ = tx.send(Ok(data.len()));
+            self.writable.notify_one();
         }
 
         // Transmit data packets.
