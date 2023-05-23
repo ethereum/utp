@@ -151,4 +151,31 @@ mod test {
 
         rx_handle.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_transfer_1m_bytes() {
+        // set-up test
+        tracing_subscriber::fmt::init();
+        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
+
+        let sender = UtpSocket::bind(sender_addr).await.unwrap();
+        let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
+
+        let config = ConnectionConfig::default();
+
+        // write 100k bytes data to the remote peer over the stream.
+        let data = vec![0xed; 1000_000];
+        let rx_handle = tokio::spawn(async move {
+            receiver.accept(config).await.unwrap();
+        });
+
+        let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+        tx_stream
+            .write(data.as_slice())
+            .await
+            .expect("Should send 1m bytes");
+
+        rx_handle.await.unwrap();
+    }
 }
