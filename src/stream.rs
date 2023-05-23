@@ -137,19 +137,31 @@ mod test {
 
         let config = ConnectionConfig::default();
 
-        // write 100k bytes data to the remote peer over the stream.
-        let data = vec![0xef; 100_000];
-        let rx_handle = tokio::spawn(async move {
-            receiver.accept(config).await.unwrap();
-        });
+        // accept connection
+        let rx = async move {
+            let mut rx_stream = receiver.accept(config).await.unwrap();
+            // read data from the remote peer until the peer indicates there is no data left to
+            // write.
+            let mut data = vec![];
+            rx_stream
+                .read_to_eof(&mut data)
+                .await
+                .expect("Should read 100k bytes")
+        };
 
-        let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
-        tx_stream
-            .write(data.as_slice())
-            .await
-            .expect("Should send 100k bytes");
+        let tx = async move {
+            // write 100k bytes data to the remote peer over the stream.
+            let data = vec![0xef; 100_000];
+            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+            tx_stream
+                .write(data.as_slice())
+                .await
+                .expect("Should send 100k bytes")
+        };
 
-        rx_handle.await.unwrap();
+        let (tx_res, rx_res) = tokio::join!(tx, rx);
+
+        assert_eq!(tx_res, rx_res);
     }
 
     #[tokio::test]
@@ -164,18 +176,30 @@ mod test {
 
         let config = ConnectionConfig::default();
 
-        // write 100k bytes data to the remote peer over the stream.
-        let data = vec![0xed; 1_000_000];
-        let rx_handle = tokio::spawn(async move {
-            receiver.accept(config).await.unwrap();
-        });
+        // accept connection
+        let rx = async move {
+            let mut rx_stream = receiver.accept(config).await.unwrap();
+            // read data from the remote peer until the peer indicates there is no data left to
+            // write.
+            let mut data = vec![];
+            rx_stream
+                .read_to_eof(&mut data)
+                .await
+                .expect("Should read 1m bytes")
+        };
 
-        let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
-        tx_stream
-            .write(data.as_slice())
-            .await
-            .expect("Should send 1m bytes");
+        let tx = async move {
+            // write 100k bytes data to the remote peer over the stream.
+            let data = vec![0xef; 1_000_000];
+            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+            tx_stream
+                .write(data.as_slice())
+                .await
+                .expect("Should send 1m bytes")
+        };
 
-        rx_handle.await.unwrap();
+        let (tx_res, rx_res) = tokio::join!(tx, rx);
+
+        assert_eq!(tx_res, rx_res);
     }
 }
