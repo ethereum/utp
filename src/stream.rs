@@ -131,14 +131,13 @@ mod test {
         tracing_subscriber::fmt::init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
-
+        // open two peer uTP sockets
         let sender = UtpSocket::bind(sender_addr).await.unwrap();
         let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
-
         let config = ConnectionConfig::default();
 
-        // accept connection
         let rx = async move {
+            // accept connection
             let mut rx_stream = receiver.accept(config).await.unwrap();
             // read data from the remote peer until the peer indicates there is no data left to
             // write.
@@ -150,9 +149,10 @@ mod test {
         };
 
         let tx = async move {
+            // initiate connection to peer
+            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
             // write 100k bytes data to the remote peer over the stream.
             let data = vec![0xef; 100_000];
-            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
             tx_stream
                 .write(data.as_slice())
                 .await
@@ -170,14 +170,13 @@ mod test {
         tracing_subscriber::fmt::init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
-
+        // open two peer uTP sockets
         let sender = UtpSocket::bind(sender_addr).await.unwrap();
         let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
-
         let config = ConnectionConfig::default();
 
-        // accept connection
         let rx = async move {
+            // accept connection
             let mut rx_stream = receiver.accept(config).await.unwrap();
             // read data from the remote peer until the peer indicates there is no data left to
             // write.
@@ -189,9 +188,10 @@ mod test {
         };
 
         let tx = async move {
-            // write 100k bytes data to the remote peer over the stream.
-            let data = vec![0xef; 1_000_000];
+            // initiate connection to peer
             let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+            // write 1 MB data to the remote peer over the stream.
+            let data = vec![0xef; 1_000_000];
             tx_stream
                 .write(data.as_slice())
                 .await
