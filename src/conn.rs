@@ -456,12 +456,17 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         // Write as much data as possible into send buffer.
         while let Some((data, ..)) = self.pending_writes.front() {
-            if data.len() <= send_buf.available() {
+            let available = send_buf.available();
+            if data.len() <= available {
                 let (data, tx) = self.pending_writes.pop_front().unwrap();
                 send_buf.write(&data).unwrap();
                 let _ = tx.send(Ok(data.len()));
                 self.writable.notify_one();
             } else {
+                let (data, tx) = self.pending_writes.pop_front().unwrap();
+                send_buf.write(&data[..available]).unwrap();
+                let _ = tx.send(Ok(available));
+                self.writable.notify_one();
                 break;
             }
         }
