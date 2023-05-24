@@ -129,8 +129,8 @@ mod test {
     async fn test_transfer_100k_bytes() {
         // set-up test
         _ = tracing_subscriber::fmt::try_init();
-        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
-        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
+        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3500));
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3501));
         // open two peer uTP sockets
         let sender = UtpSocket::bind(sender_addr).await.unwrap();
         let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
@@ -168,8 +168,8 @@ mod test {
     async fn test_transfer_1_megabyte() {
         // set-up test
         _ = tracing_subscriber::fmt::try_init();
-        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
-        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
+        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3502));
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3503));
         // open two peer uTP sockets
         let sender = UtpSocket::bind(sender_addr).await.unwrap();
         let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
