@@ -128,7 +128,7 @@ mod test {
     #[tokio::test]
     async fn test_transfer_100k_bytes() {
         // set-up test
-        tracing_subscriber::fmt::init();
+        _ = tracing_subscriber::fmt::try_init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
         // open two peer uTP sockets
@@ -167,7 +167,7 @@ mod test {
     #[tokio::test]
     async fn test_transfer_1_megabyte() {
         // set-up test
-        tracing_subscriber::fmt::init();
+        _ = tracing_subscriber::fmt::try_init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
         // open two peer uTP sockets

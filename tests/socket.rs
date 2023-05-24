@@ -7,7 +7,7 @@ use utp_rs::socket::UtpSocket;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn socket() {
-    tracing_subscriber::fmt::init();
+    _ = tracing_subscriber::fmt::try_init();
 
     let conn_config = ConnectionConfig::default();
 
