@@ -119,3 +119,101 @@ impl<P> Drop for UtpStream<P> {
         let _ = self.shutdown();
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::conn::ConnectionConfig;
+    use crate::socket::UtpSocket;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn test_transfer_65535_packets_in_theory_should_pass() {
+        // set-up test
+        tracing_subscriber::fmt::init();
+        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3700));
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3701));
+
+        let sender = UtpSocket::bind(sender_addr).await.unwrap();
+        let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
+
+        let config = ConnectionConfig::default();
+
+        // accept connection
+        let rx = async move {
+            let mut rx_stream = receiver.accept(config).await.unwrap();
+            // read data from the remote peer until the peer indicates there is no data left to
+            // write.
+            let mut data = vec![];
+            rx_stream
+                .read_to_eof(&mut data)
+                .await
+                .expect("Should read 1 megabyte")
+        };
+
+        let tx = async move {
+            // write 100k bytes data to the remote peer over the stream.
+            let data = vec![0xef; 1];
+            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+
+            let mut letter = 0;
+            for _ in  1..65535 {
+                letter += tx_stream
+                    .write(data.as_slice())
+                    .await
+                    .expect("Should send 1 megabyte");
+            }
+
+            letter
+        };
+
+        let (tx_res, rx_res) = tokio::join!(tx, rx);
+
+        assert_eq!(tx_res, rx_res);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_65536_packets_in_theory_should_fail() {
+        // set-up test
+        tracing_subscriber::fmt::init();
+        let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3800));
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3801));
+
+        let sender = UtpSocket::bind(sender_addr).await.unwrap();
+        let receiver = UtpSocket::bind(receiver_addr).await.unwrap();
+
+        let config = ConnectionConfig::default();
+
+        // accept connection
+        let rx = async move {
+            let mut rx_stream = receiver.accept(config).await.unwrap();
+            // read data from the remote peer until the peer indicates there is no data left to
+            // write.
+            let mut data = vec![];
+            rx_stream
+                .read_to_eof(&mut data)
+                .await
+                .expect("Should pass to send 65535 packets")
+        };
+
+        let tx = async move {
+            // write 100k bytes data to the remote peer over the stream.
+            let data = vec![0xef; 1];
+            let mut tx_stream = sender.connect(receiver_addr, config).await.unwrap();
+
+            let mut letter = 0;
+            for _ in  1..65536 {
+                letter += tx_stream
+                    .write(data.as_slice())
+                    .await
+                    .expect("Should fail to send 65536 packets");
+            }
+
+            letter
+        };
+
+        let (tx_res, rx_res) = tokio::join!(tx, rx);
+
+        assert_eq!(tx_res, rx_res);
+    }
+}
+
