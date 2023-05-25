@@ -129,7 +129,7 @@ mod test {
     #[tokio::test]
     async fn test_transfer_65535_packets_in_theory_should_pass() {
         // set-up test
-        tracing_subscriber::fmt::init();
+        _ = tracing_subscriber::fmt::try_init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3700));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3701));
 
@@ -174,7 +174,7 @@ mod test {
     #[tokio::test]
     async fn test_transfer_65536_packets_in_theory_should_fail() {
         // set-up test
-        tracing_subscriber::fmt::init();
+        _ = tracing_subscriber::fmt::try_init();
         let sender_addr = SocketAddr::from(([127, 0, 0, 1], 3800));
         let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 3801));
 
