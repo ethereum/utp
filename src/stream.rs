@@ -10,7 +10,7 @@ use crate::packet::Packet;
 
 /// The size of the send and receive buffers.
 // TODO: Make the buffer size configurable.
-const BUF: usize = 1024 * 1024;
+pub const BUFFER_CAPACITY: usize = 1024 * 1024;
 
 pub struct UtpStream<P> {
     cid: ConnectionId<P>,
@@ -31,8 +31,13 @@ where
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
-        let mut conn =
-            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
+        let mut conn = conn::Connection::<BUFFER_CAPACITY, P>::new(
+            cid.clone(),
+            config,
+            syn,
+            connected,
+            socket_events,
+        );
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();

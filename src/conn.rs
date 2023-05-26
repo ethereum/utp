@@ -16,9 +16,11 @@ use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
 use crate::sent::SentPackets;
 use crate::seq::CircularRangeInclusive;
+use crate::stream::BUFFER_CAPACITY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
+    BufferCapacityExceeded,
     EmptyDataPayload,
     InvalidAckNum,
     InvalidFin,
@@ -32,6 +34,7 @@ enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
+            Self::BufferCapacityExceeded => "data written exceeds buffer capacity",
             Self::EmptyDataPayload => "missing payload in DATA packet",
             Self::InvalidAckNum => "received ACK for unsent packet",
             Self::InvalidFin => "received multiple FIN packets with distinct sequence numbers",
@@ -52,8 +55,8 @@ impl From<Error> for io::ErrorKind {
     fn from(value: Error) -> Self {
         use Error::*;
         match value {
-            EmptyDataPayload | InvalidAckNum | InvalidFin | InvalidSeqNum | InvalidSyn
-            | SynFromAcceptor => io::ErrorKind::InvalidData,
+            BufferCapacityExceeded | EmptyDataPayload | InvalidAckNum | InvalidFin
+            | InvalidSeqNum | InvalidSyn | SynFromAcceptor => io::ErrorKind::InvalidData,
             Reset => io::ErrorKind::ConnectionReset,
             TimedOut => io::ErrorKind::TimedOut,
         }
@@ -461,6 +464,12 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 send_buf.write(&data).unwrap();
                 let _ = tx.send(Ok(data.len()));
                 self.writable.notify_one();
+            } else if data.len() > BUFFER_CAPACITY {
+                // TODO: refactor SendBuffer so we have 1 send buffer instead of 2
+                let (_, tx) = self.pending_writes.pop_front().unwrap();
+                let _ = tx.send(Err(io::Error::from(io::ErrorKind::from(
+                    Error::BufferCapacityExceeded,
+                ))));
             } else {
                 break;
             }
