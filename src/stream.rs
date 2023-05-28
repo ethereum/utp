@@ -66,24 +66,22 @@ where
                 .send((buf.capacity(), tx))
                 .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
 
-            match rx.await {
-                Ok(result) => match result {
-                    Ok(mut data) => {
-                        if data.is_empty() {
-                            break Ok(n);
-                        }
-                        n += data.len();
-                        buf.append(&mut data);
+            let mut data = rx
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))??;
 
-                        // Reserve additional space in the buffer proportional to the amount of
-                        // data read.
-                        buf.reserve(data.len());
-                    }
-                    Err(err) => return Err(err),
-                },
-                Err(err) => return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
+            if data.is_empty() {
+                break;
             }
+            n += data.len();
+            buf.append(&mut data);
+            // Reserve additional space in the buffer proportional to the amount of
+            // data read.
+            buf.reserve(data.len());
         }
+
+        self.shutdown()?;
+        Ok(n)
     }
 
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -96,10 +94,12 @@ where
             .send((buf.to_vec(), tx))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
 
-        match rx.await {
-            Ok(n) => Ok(n?),
-            Err(err) => Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
-        }
+        let res = rx
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
+
+        self.shutdown()?;
+        res
     }
 }
 
