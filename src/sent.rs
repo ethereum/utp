@@ -30,29 +30,29 @@ impl SentPacket {
 #[derive(Clone, Debug)]
 pub struct SentPackets {
     packets: SizableCircularBuffer<SentPacket>,
-    init_seq_num: u16,
+    seq_num: u16,
     lost_packets: BTreeSet<u16>,
     congestion_ctrl: congestion::Controller,
 }
 
 impl SentPackets {
-    /// Note: `init_seq_num` corresponds to the sequence number just before the sequence number of
+    /// Note: `seq_num` corresponds to the sequence number just before the sequence number of
     /// the first packet to track.
-    pub fn new(init_seq_num: u16, congestion_ctrl: congestion::Controller) -> Self {
+    pub fn new(seq_num: u16, congestion_ctrl: congestion::Controller) -> Self {
         Self {
             packets: SizableCircularBuffer::new(),
-            init_seq_num,
+            seq_num,
             lost_packets: BTreeSet::new(),
             congestion_ctrl,
         }
     }
 
+    pub fn inc_seq_num(&mut self) {
+        self.seq_num = self.seq_num.wrapping_add(1);
+    }
+
     pub fn next_seq_num(&self) -> u16 {
-        // Assume cast is okay, meaning that `packets` never contains more than `u16::MAX`
-        // elements.
-        self.init_seq_num
-            .wrapping_add(self.packets.len() as u16)
-            .wrapping_add(1)
+        self.seq_num.wrapping_add(1)
     }
 
     pub fn ack_num(&self) -> u16 {
@@ -60,8 +60,10 @@ impl SentPackets {
     }
 
     pub fn seq_num_range(&self) -> CircularRangeInclusive {
-        let end = self.next_seq_num().wrapping_sub(1);
-        CircularRangeInclusive::new(self.init_seq_num, end)
+        CircularRangeInclusive::new(
+            self.seq_num.wrapping_sub(self.packets.len() as u16),
+            self.seq_num,
+        )
     }
 
     pub fn timeout(&self) -> Duration {
@@ -150,6 +152,9 @@ impl SentPackets {
 
         // The unwrap is safe given the check above on the available window.
         self.congestion_ctrl.on_transmit(seq_num, transmit).unwrap();
+
+        // increment sequence number on transmit
+        self.inc_seq_num();
     }
 
     /// # Panics
@@ -298,11 +303,11 @@ impl SentPackets {
 
     /// Returns the "normalized" index for `seq_num` based on the initial sequence number.
     fn seq_num_index(&self, seq_num: u16) -> usize {
-        // The first sequence number is equal to `self.init_seq_num.wrapping_add(1)`.
-        if seq_num > self.init_seq_num {
-            usize::from(seq_num - self.init_seq_num - 1)
+        let init_seq_num = self.seq_num.wrapping_sub(self.packets.len() as u16);
+        if seq_num > init_seq_num {
+            usize::from(seq_num - init_seq_num - 1)
         } else {
-            usize::from((u16::MAX - self.init_seq_num).wrapping_add(seq_num))
+            usize::from((u16::MAX - init_seq_num).wrapping_add(seq_num))
         }
     }
 
@@ -351,7 +356,10 @@ impl SentPackets {
                 }
                 last_ack_num.wrapping_add(1)
             }
-            None => self.init_seq_num.wrapping_add(1),
+            None => self
+                .seq_num
+                .wrapping_sub(self.packets.len() as u16)
+                .wrapping_add(1),
         };
 
         Some(seq_num)
@@ -394,6 +402,7 @@ mod test {
                         retransmissions: Default::default(),
                     },
                 );
+                sent_packets.inc_seq_num();
             }
 
             TestResult::from_bool(sent_packets.next_seq_num() == final_seq_num.wrapping_add(1))
