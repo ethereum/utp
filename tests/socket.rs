@@ -55,8 +55,6 @@ async fn socket() {
             .unwrap();
         let n = stream.write(&data_one).await.unwrap();
         assert_eq!(n, data_one.len());
-
-        let _ = stream.shutdown();
     });
 
     let data_two = vec![0xfe; 8192 * 2 * 2];
@@ -93,8 +91,6 @@ async fn socket() {
             .unwrap();
         let n = stream.write(&data_two).await.unwrap();
         assert_eq!(n, data_two.len());
-
-        let _ = stream.shutdown();
     });
 
     let (one, two) = tokio::join!(recv_one_handle, recv_two_handle);
