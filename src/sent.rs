@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crate::congestion;
 use crate::packet::{PacketType, SelectiveAck};
 use crate::seq::CircularRangeInclusive;
+use crate::utils::SizableCircularBuffer;
 
 const LOSS_THRESHOLD: usize = 3;
 
@@ -28,7 +29,7 @@ impl SentPacket {
 
 #[derive(Clone, Debug)]
 pub struct SentPackets {
-    packets: Vec<SentPacket>,
+    packets: SizableCircularBuffer<SentPacket>,
     init_seq_num: u16,
     lost_packets: BTreeSet<u16>,
     congestion_ctrl: congestion::Controller,
@@ -39,7 +40,7 @@ impl SentPackets {
     /// the first packet to track.
     pub fn new(init_seq_num: u16, congestion_ctrl: congestion::Controller) -> Self {
         Self {
-            packets: Vec::new(),
+            packets: SizableCircularBuffer::new(),
             init_seq_num,
             lost_packets: BTreeSet::new(),
             congestion_ctrl,
@@ -83,14 +84,12 @@ impl SentPackets {
         !self.lost_packets.is_empty()
     }
 
-    pub fn lost_packets(&self) -> Vec<(u16, PacketType, Option<Bytes>)> {
+    pub fn lost_packets(&mut self) -> Vec<(u16, PacketType, Option<Bytes>)> {
         self.lost_packets
             .iter()
             .map(|seq| {
-                let index = self.seq_num_index(*seq);
-
                 // The unwrap is safe because only sent packets may be lost.
-                let packet = self.packets.get(index).unwrap();
+                let packet = self.packets.get(*seq as usize).unwrap();
 
                 (packet.seq_num, packet.packet_type, packet.data.clone())
             })
@@ -126,7 +125,7 @@ impl SentPackets {
             panic!("transmit exceeds available send window");
         }
 
-        match self.packets.get_mut(index) {
+        match self.packets.get_mut(seq_num as usize) {
             Some(sent) => {
                 sent.retransmissions.push(now);
             }
@@ -139,7 +138,7 @@ impl SentPackets {
                     retransmissions: Vec::new(),
                     acks: Vec::new(),
                 };
-                self.packets.push(sent);
+                self.packets.push(seq_num, sent);
             }
         }
 
@@ -223,18 +222,26 @@ impl SentPackets {
         let mut lost = BTreeSet::new();
 
         let start = match self.first_unacked_seq_num() {
-            Some(first_unacked) => self.seq_num_index(first_unacked),
+            Some(first_unacked) => first_unacked,
             None => return lost,
         };
 
-        for packet in self.packets[start..].iter().rev() {
-            if packet.acks.is_empty() && acked >= LOSS_THRESHOLD {
-                lost.insert(packet.seq_num);
+        let mut i = self.packets.last_inserted();
+        loop {
+            if let Some(packet) = self.packets.get(i as usize) {
+                if packet.acks.is_empty() && acked >= LOSS_THRESHOLD {
+                    lost.insert(packet.seq_num);
+                }
+
+                if !packet.acks.is_empty() {
+                    acked += 1;
+                }
             }
 
-            if !packet.acks.is_empty() {
-                acked += 1;
+            if i == start {
+                break;
             }
+            i = i.wrapping_sub(1);
         }
 
         lost
@@ -244,8 +251,7 @@ impl SentPackets {
     ///
     /// Panics if `seq_num` does not correspond to a previously sent packet.
     fn ack(&mut self, seq_num: u16, delay: Duration, now: Instant) {
-        let index = self.seq_num_index(seq_num);
-        let packet = self.packets.get_mut(index).unwrap();
+        let packet = self.packets.get_mut(seq_num as usize).unwrap();
 
         let ack = congestion::Ack {
             delay,
@@ -262,15 +268,16 @@ impl SentPackets {
     /// Acknowledges any unacknowledged packets that precede `seq_num`.
     fn ack_prior_unacked(&mut self, seq_num: u16, delay: Duration, now: Instant) {
         if let Some(first_unacked) = self.first_unacked_seq_num() {
-            let start = self.seq_num_index(first_unacked);
-            let end = self.seq_num_index(seq_num);
+            let start = first_unacked;
+            let end = seq_num;
             if start >= end {
                 return;
             }
 
-            let to_ack: Vec<u16> = self.packets[start..end].iter().map(|p| p.seq_num).collect();
-            for seq_num in to_ack {
-                self.ack(seq_num, delay, now);
+            for i in start..end {
+                if let Some(packet) = self.packets.get(i as usize) {
+                    self.ack(packet.seq_num, delay, now);
+                }
             }
         }
     }
@@ -310,11 +317,17 @@ impl SentPackets {
         }
 
         let mut num = None;
-        for packet in &self.packets {
-            if !packet.acks.is_empty() {
-                num = Some(packet.seq_num);
-            } else {
-                break;
+        for i in self
+            .packets
+            .last_inserted()
+            .wrapping_sub(self.packets.len() as u16)..self.packets.last_inserted()
+        {
+            if let Some(packet) = self.packets.get(i as usize) {
+                if !packet.acks.is_empty() {
+                    num = Some(packet.seq_num);
+                } else {
+                    break;
+                }
             }
         }
 
@@ -333,7 +346,7 @@ impl SentPackets {
         let seq_num = match self.last_ack_num() {
             Some(last_ack_num) => {
                 // If the last ACK num corresponds to the last packet, then return `None`.
-                if self.packets.last().unwrap().seq_num == last_ack_num {
+                if self.packets.last_inserted() == last_ack_num {
                     return None;
                 }
                 last_ack_num.wrapping_add(1)
@@ -370,14 +383,17 @@ mod test {
             let range = CircularRangeInclusive::new(init_seq_num.wrapping_add(1), final_seq_num);
             let transmission = Instant::now();
             for seq_num in range {
-                sent_packets.packets.push(SentPacket {
+                sent_packets.packets.push(
                     seq_num,
-                    packet_type: PacketType::Data,
-                    data: None,
-                    transmission,
-                    acks: Default::default(),
-                    retransmissions: Default::default(),
-                });
+                    SentPacket {
+                        seq_num,
+                        packet_type: PacketType::Data,
+                        data: None,
+                        transmission,
+                        acks: Default::default(),
+                        retransmissions: Default::default(),
+                    },
+                );
             }
 
             TestResult::from_bool(sent_packets.next_seq_num() == final_seq_num.wrapping_add(1))
@@ -399,7 +415,7 @@ mod test {
 
         assert_eq!(sent_packets.packets.len(), 1);
 
-        let packet = &sent_packets.packets[0];
+        let packet = sent_packets.packets.get(seq_num as usize).unwrap();
         assert_eq!(packet.seq_num, seq_num);
         assert_eq!(packet.transmission, now);
         assert!(packet.acks.is_empty());
@@ -422,7 +438,7 @@ mod test {
 
         assert_eq!(sent_packets.packets.len(), 1);
 
-        let packet = &sent_packets.packets[0];
+        let packet = sent_packets.packets.get(seq_num as usize).unwrap();
         assert_eq!(packet.seq_num, seq_num);
         assert_eq!(packet.transmission, first);
         assert!(packet.acks.is_empty());
@@ -455,9 +471,11 @@ mod test {
         let len = data.len() as u32;
 
         const COUNT: usize = 10;
+        let mut seq_nums = Vec::new();
         for _ in 0..COUNT {
             let now = Instant::now();
             let seq_num = sent_packets.next_seq_num();
+            seq_nums.push(seq_num);
             sent_packets.on_transmit(seq_num, PacketType::Data, Some(data.clone()), len, now);
         }
 
@@ -477,11 +495,32 @@ mod test {
             DELAY,
             now,
         );
-        assert_eq!(sent_packets.packets[0].acks.len(), 1);
-        assert!(sent_packets.packets[1].acks.is_empty());
-        for i in 2..COUNT {
+        assert_eq!(
+            sent_packets
+                .packets
+                .get(seq_nums[0] as usize)
+                .unwrap()
+                .acks
+                .len(),
+            1
+        );
+        assert!(sent_packets
+            .packets
+            .get(seq_nums[1] as usize)
+            .unwrap()
+            .acks
+            .is_empty());
+        for (i, seq_nums) in seq_nums.iter().enumerate().take(COUNT).skip(2) {
             let is_empty = i % 2 != 0;
-            assert_eq!(sent_packets.packets[i].acks.is_empty(), is_empty);
+            assert_eq!(
+                sent_packets
+                    .packets
+                    .get(*seq_nums as usize)
+                    .unwrap()
+                    .acks
+                    .is_empty(),
+                is_empty
+            );
         }
     }
 
@@ -496,9 +535,11 @@ mod test {
 
         const COUNT: usize = 10;
         const START: usize = COUNT - LOSS_THRESHOLD;
+        let mut seq_nums = Vec::new();
         for i in 0..COUNT {
             let now = Instant::now();
             let seq_num = sent_packets.next_seq_num();
+            seq_nums.push(seq_num);
             sent_packets.on_transmit(seq_num, PacketType::Data, Some(data.clone()), len, now);
 
             if i >= START {
@@ -507,8 +548,8 @@ mod test {
         }
 
         let lost = sent_packets.detect_lost_packets();
-        for i in 0..START {
-            let packet = &sent_packets.packets[i];
+        for seq_num in seq_nums.iter().take(START) {
+            let packet = sent_packets.packets.get(*seq_num as usize).unwrap();
             assert!(lost.contains(&packet.seq_num));
         }
     }
@@ -532,8 +573,7 @@ mod test {
         let now = Instant::now();
         sent_packets.ack(seq_num, DELAY, now);
 
-        let index = sent_packets.seq_num_index(seq_num);
-        let packet = sent_packets.packets.get(index).unwrap();
+        let packet = sent_packets.packets.get(seq_num as usize).unwrap();
 
         assert_eq!(packet.acks.len(), 1);
         assert_eq!(packet.acks[0], now);
@@ -563,7 +603,7 @@ mod test {
         let now = Instant::now();
         sent_packets.ack_prior_unacked(ACK_NUM, DELAY, now);
         for i in 0..usize::from(ACK_NUM) {
-            assert_eq!(sent_packets.packets[i].acks.len(), 1);
+            assert_eq!(sent_packets.packets.get(i).unwrap().acks.len(), 1);
         }
     }
 
