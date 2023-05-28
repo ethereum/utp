@@ -455,15 +455,20 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         // Write as much data as possible into send buffer.
-        while let Some((data, ..)) = self.pending_writes.front() {
-            if data.len() <= send_buf.available() {
-                let (data, tx) = self.pending_writes.pop_front().unwrap();
-                send_buf.write(&data).unwrap();
-                let _ = tx.send(Ok(data.len()));
-                self.writable.notify_one();
-            } else {
+        while send_buf.available() > 0 {
+            let Some((data, tx)) = self.pending_writes.pop_front() else {
                 break;
+            };
+            let written = send_buf.write(&data).unwrap();
+            if written < data.len() {
+                // not all data fit in the send buffer, chunk data
+                let mut data = data;
+                let remaining = data.split_off(send_buf.available());
+                self.pending_writes.push_front((remaining, tx));
+            } else {
+                let _ = tx.send(Ok(data.len()));
             }
+            self.writable.notify_one();
         }
 
         // Transmit data packets.
