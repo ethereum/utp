@@ -463,7 +463,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             if written < data.len() {
                 // not all data fit in the send buffer, chunk data
                 let mut data = data;
-                let remaining = data.split_off(send_buf.available());
+                let remaining = data.split_off(data.len() - written);
                 self.pending_writes.push_front((remaining, tx));
             } else {
                 let _ = tx.send(Ok(data.len()));
