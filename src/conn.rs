@@ -85,8 +85,22 @@ enum State<const N: usize> {
     },
 }
 
-pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
+pub type Write = (Chunk, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
+
+/// Chunks of a [`Write`] not yet written.
+pub struct Chunk {
+    /// Data pending write.
+    data: Vec<u8>,
+    /// The accumulated length of written chunks
+    acc_len: usize,
+}
+
+impl From<Vec<u8>> for Chunk {
+    fn from(data: Vec<u8>) -> Self {
+        Self { data, acc_len: 0 }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
@@ -456,17 +470,24 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         // Write as much data as possible into send buffer.
         while send_buf.available() > 0 {
-            let Some((data, tx)) = self.pending_writes.pop_front() else {
+            let Some((Chunk{data, mut acc_len}, tx)) = self.pending_writes.pop_front() else {
                 break;
             };
             let written = send_buf.write(&data).unwrap();
+            acc_len += written;
             if written < data.len() {
                 // not all data fit in the send buffer, chunk data
                 let mut data = data;
                 let remaining = data.split_off(data.len() - written);
-                self.pending_writes.push_front((remaining, tx));
+                self.pending_writes.push_front((
+                    Chunk {
+                        data: remaining,
+                        acc_len,
+                    },
+                    tx,
+                ));
             } else {
-                let _ = tx.send(Ok(data.len()));
+                let _ = tx.send(Ok(acc_len));
             }
             self.writable.notify_one();
         }
