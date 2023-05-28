@@ -471,29 +471,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             self.writable.notify_one();
         }
 
-        let mut wrote_data = false;
-        // Write as much data as possible into send buffer.
-        while send_buf.available() > 0 {
-            let Some((data, tx)) = self.pending_writes.pop_front() else {
-                break;
-            };
-            let written = send_buf.write(&data).unwrap();
-            if written < data.len() {
-                // not all data fit in the send buffer, chunk data
-                let mut data = data;
-                let remaining = data.split_off(send_buf.available());
-                tracing::trace!("remaining len {}", remaining.len());
-                self.pending_writes.push_front((remaining, tx));
-            } else {
-                let _ = tx.send(Ok(data.len()));
-            }
-            wrote_data = true;
-        }
-
-        if wrote_data {
-            self.writable.notify_one();
-        }
-
         // Transmit data packets.
         // TODO: Helper for construction of DATA packet.
         let mut seq_num = sent_packets.next_seq_num();
