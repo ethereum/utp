@@ -28,10 +28,8 @@ impl<const N: usize> ReceiveBuffer<N> {
 
     /// Returns the number of available bytes remaining in the buffer.
     pub fn available(&self) -> usize {
-        N.saturating_sub(
-            self.offset
-                .saturating_sub(self.pending.values().fold(0, |acc, data| acc + data.len())),
-        )
+        N.saturating_sub(self.offset)
+            .saturating_sub(self.pending.values().fold(0, |acc, data| acc + data.len()))
     }
 
     /// Returns `true` if the buffer is empty.
