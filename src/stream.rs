@@ -189,7 +189,7 @@ mod test {
         let mut rx_stream = rx_stream.expect("Should accept stream");
 
         // write 100k bytes data to the remote peer over the stream.
-        let data = vec![0xef; 1_00_000];
+        let data = vec![0xef; 100_000];
         let tx = tx_stream.write(data.as_slice());
 
         // read data from the remote peer until the peer indicates there is no data left to write.
@@ -235,8 +235,8 @@ mod test {
 
         let (tx_res, rx_res) = tokio::join!(tx, rx);
 
-        let sent = tx_res.expect("Should write 100k bytes");
-        let received = rx_res.expect("Should read 100k bytes");
+        let sent = tx_res.expect("Should write 1 megabyte");
+        let received = rx_res.expect("Should read 1 megabyte");
 
         assert_eq!(sent, received);
     }
