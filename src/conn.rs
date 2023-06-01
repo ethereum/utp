@@ -746,9 +746,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
-                    self.socket_events
-                        .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
-                        .expect("outgoing channel should be open if connection is not closed");
+                    let event = SocketEvent::Outgoing((state, self.cid.peer.clone()));
+                    if self.socket_events.send(event).is_err() {
+                        tracing::warn!("Cannot transmit state packet: socket closed channel");
+                        return;
+                    }
                 }
             }
             PacketType::State | PacketType::Reset => {}
@@ -1113,9 +1115,10 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
-        socket_events
-            .send(SocketEvent::Outgoing((packet, dest.clone())))
-            .expect("outgoing channel should be open if connection is not closed");
+        let outbound = SocketEvent::Outgoing((packet, dest.clone()));
+        if socket_events.send(outbound).is_err() {
+            tracing::warn!("Cannot transmit packet: socket closed channel");
+        }
     }
 }
 
