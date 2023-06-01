@@ -286,7 +286,15 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
                         let unacked: Vec<u16> = self.unacked.keys().copied().collect();
-                        tracing::warn!(?unacked, "idle timeout expired, closing...");
+                        if let State::Closing { local_fin, remote_fin, .. } = self.state {
+                            tracing::warn!(?unacked, ?local_fin, ?remote_fin, "idle timeout expired while closing...");
+                        } else if let State::Established  { .. } = self.state {
+                            tracing::warn!(?unacked, "idle timeout expired in established connection, closing...");
+                        } else if let State::Connecting { .. } = self.state {
+                            tracing::warn!(?unacked, "idle timeout expired in , closing...");
+                        } else {
+                            panic!("unreachable");
+                        }
 
                         self.state = State::Closed { err: Some(Error::TimedOut) };
                     }
