@@ -251,7 +251,13 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             tokio::select! {
                 Some(event) = stream_events.recv() => {
                     match event {
-                        StreamEvent::Incoming(packet) => {
+                        StreamEvent::Incoming(packet, receive_time) => {
+                            let queue_time = Instant::now() - receive_time;
+                            if queue_time > Duration::from_millis(40) {
+                                tracing::debug!(?queue_time, "incoming packet queued for too long");
+                            } else if queue_time > Duration::from_millis(400) {
+                                tracing::warn!(?queue_time, "incoming packet queued for way too long");
+                            }
                             // Reset the idle timeout on any incoming packet.
                             let idle_deadline = tokio::time::Instant::now() + self.config.max_idle_timeout;
                             idle_timeout.as_mut().reset(idle_deadline);
