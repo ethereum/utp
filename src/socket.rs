@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -81,13 +82,14 @@ where
 
                         let init_cid = cid_from_packet(&packet, &src, false);
                         let acc_cid = cid_from_packet(&packet, &src, true);
+                        let now = Instant::now();
                         let mut conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
                             .or_else(|| conns.get(&init_cid));
                         match conn {
                             Some(conn) => {
-                                let _ = conn.send(StreamEvent::Incoming(packet));
+                                let _ = conn.send(StreamEvent::Incoming(packet, now));
                             }
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {

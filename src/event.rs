@@ -1,9 +1,10 @@
+use std::time::Instant;
 use crate::cid::ConnectionId;
 use crate::packet::Packet;
 
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
-    Incoming(Packet),
+    Incoming(Packet, Instant),
     Shutdown,
 }
 
