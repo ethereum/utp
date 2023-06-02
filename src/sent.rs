@@ -6,6 +6,7 @@ use crate::packet::{PacketType, SelectiveAck};
 use crate::seq::CircularRangeInclusive;
 
 const LOSS_THRESHOLD: usize = 3;
+const MAX_TIMEOUT: Duration = Duration::from_secs(4);
 
 type Bytes = Vec<u8>;
 
@@ -64,7 +65,7 @@ impl SentPackets {
     }
 
     pub fn timeout(&self) -> Duration {
-        self.congestion_ctrl.timeout()
+        std::cmp::min(self.congestion_ctrl.timeout(), MAX_TIMEOUT)
     }
 
     pub fn on_timeout(&mut self) {
@@ -348,10 +349,17 @@ impl SentPackets {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::conn::ConnectionConfig;
 
     use quickcheck::{quickcheck, TestResult};
 
     const DELAY: Duration = Duration::from_millis(100);
+
+    fn typical_sent_packets() -> SentPackets {
+        let init_seq_num = u16::MAX;
+        let congestion_ctrl = congestion::Controller::new(congestion::Config::default());
+        SentPackets::new(init_seq_num, congestion_ctrl)
+    }
 
     // TODO: Bolster tests.
 
@@ -592,5 +600,18 @@ mod test {
 
         let zero = init_seq_num.wrapping_add(1);
         assert_eq!(sent_packets.seq_num_index(zero), 0);
+    }
+
+    #[test]
+    fn max_timeout_shorter_than_idle_timeout() {
+        let mut sent_packets = typical_sent_packets();
+        for _ in 0..20 {
+            sent_packets.on_timeout();
+        }
+        // The timeout should be capped at less than half the idle timeout.
+        // Otherwise, the connection will close itself due to idle timeout before it has a chance
+        // to retry the packet.
+        let conn_conf = ConnectionConfig::default();
+        assert!(sent_packets.timeout() < conn_conf.max_idle_timeout / 2);
     }
 }
