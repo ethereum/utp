@@ -79,7 +79,10 @@ where
                         // data read.
                         buf.reserve(data.len());
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        tracing::error!(?self.cid, "read to eof error: {:?}", err);
+                        return Err(err);
+                    }
                 },
                 Err(err) => return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
             }
