@@ -7,7 +7,7 @@ use utp_rs::cid;
 use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket() {
     tracing_subscriber::fmt::init();
 
