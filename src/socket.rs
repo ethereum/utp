@@ -299,8 +299,14 @@ where
 
         match connected_rx.await {
             Ok(Ok(..)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+            Ok(Err(err)) => {
+                tracing::error!(?err, "Got error when trying to open connection with cid");
+                Err(err)
+            }
+            Err(err) => {
+                tracing::error!(?err, "Failed to open connection with cid");
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            },
         }
     }
 

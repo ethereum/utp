@@ -11,6 +11,8 @@ use utp_rs::socket::UtpSocket;
 async fn socket() {
     tracing_subscriber::fmt::init();
 
+    tracing::info!("starting socket test");
+
     let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
     let send_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
 
