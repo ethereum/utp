@@ -60,7 +60,14 @@ async fn initiate_transfer(
     let recv_handle = tokio::spawn(async move {
         let mut stream = recv.accept_with_cid(recv_cid, conn_config).await.unwrap();
         let mut buf = vec![];
-        let n = stream.read_to_eof(&mut buf).await.unwrap();
+        let n = match stream.read_to_eof(&mut buf).await {
+            Ok(num_bytes) => num_bytes,
+            Err(err) => {
+                let cid = stream.cid();
+                tracing::error!(?cid, "read to eof error: {:?}", err);
+                panic!("fail to read data");
+            }
+        };
         tracing::info!(cid.send = %recv_cid.send, cid.recv = %recv_cid.recv, "read {n} bytes from uTP stream");
 
         assert_eq!(n, data_recv.len());
