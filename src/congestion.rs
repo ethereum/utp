@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 pub(crate) const DEFAULT_TARGET_MICROS: u32 = 100_000;
 pub(crate) const DEFAULT_INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const DEFAULT_MIN_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_MAX_PACKET_SIZE_BYTES: u32 = 1024;
 const DEFAULT_GAIN: f32 = 1.0;
 const DEFAULT_DELAY_WINDOW: Duration = Duration::from_secs(120);
@@ -260,7 +261,7 @@ impl Controller {
     /// Registers a timeout with the controller.
     pub fn on_timeout(&mut self) {
         self.max_window_size_bytes = self.min_window_size_bytes;
-        self.timeout *= 2;
+        self.timeout = cmp::min(self.timeout * 2, MAX_TIMEOUT);
     }
 
     /// Adjusts the maximum window (i.e. congestion window) by `adjustment`, keeping the size of
