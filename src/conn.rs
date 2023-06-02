@@ -249,6 +249,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         tokio::pin!(idle_timeout);
         loop {
             tokio::select! {
+                biased;
                 Some(event) = stream_events.recv() => {
                     match event {
                         StreamEvent::Incoming(packet) => {
@@ -262,12 +263,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                             shutting_down = true;
                         }
                     }
-                }
-                Some(Ok(timeout)) = self.unacked.next() => {
-                    let (seq, packet) = timeout;
-                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
-
-                    self.on_timeout(packet, Instant::now());
                 }
                 Some(write) = writes.recv(), if !shutting_down => {
                     // Reset the idle timeout on any new write.
@@ -284,6 +279,12 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 _ = self.writable.notified() => {
                     self.process_writes(Instant::now());
+                }
+                Some(Ok(timeout)) = self.unacked.next() => {
+                    let (seq, packet) = timeout;
+                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
+
+                    self.on_timeout(packet, Instant::now());
                 }
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
