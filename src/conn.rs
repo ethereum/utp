@@ -101,13 +101,14 @@ pub struct ConnectionConfig {
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
+        let max_idle_timeout = Duration::from_secs(10);
         Self {
             max_conn_attempts: 3,
-            max_idle_timeout: Duration::from_secs(10),
+            max_idle_timeout,
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
-            max_timeout: congestion::DEFAULT_MAX_TIMEOUT,
+            max_timeout: max_idle_timeout,
             target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
         }
     }
