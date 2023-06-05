@@ -136,6 +136,7 @@ pub struct Connection<const N: usize, P> {
     readable: Notify,
     pending_writes: VecDeque<Write>,
     writable: Notify,
+    latest_timeout: Option<Instant>,
 }
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
@@ -176,6 +177,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
@@ -642,7 +644,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     return;
                 }
 
-                sent_packets.on_timeout();
+                // To prevent timeout amplification in the event that a batch of packets sent near
+                // the same time all timeout, we only register a new timeout if the time elapsed
+                // since the latest timeout is greater than the existing timeout.
+                //
+                // For example, if the current congestion control timeout is 1s, then we only
+                // register a new timeout if the time elapsed since the latest registered timeout
+                // is greater than 1s.
+                let timeout = match self.latest_timeout {
+                    Some(latest) => latest.elapsed() > sent_packets.timeout(),
+                    None => true,
+                };
+                if timeout {
+                    sent_packets.on_timeout();
+                    self.latest_timeout = Some(Instant::now());
+                }
 
                 // TODO: Limit number of retransmissions.
                 let recv_window = recv_buf.available() as u32;
@@ -1125,6 +1141,7 @@ mod test {
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
