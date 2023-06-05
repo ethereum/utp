@@ -687,12 +687,12 @@ mod tests {
 
         #[test]
         fn on_timeout_not_exceed_max() {
-            const INITIAL_TIMEOUT: Duration = Duration::from_secs(2);
             const MAX_TIMEOUT: Duration = Duration::from_secs(3);
-
-            let mut config = Config::default();
-            config.initial_timeout = INITIAL_TIMEOUT;
-            config.max_timeout = MAX_TIMEOUT;
+            let config = Config {
+                initial_timeout: Duration::from_secs(2),
+                max_timeout: MAX_TIMEOUT,
+                ..Default::default()
+            };
 
             let mut ctrl = Controller::new(config);
 
