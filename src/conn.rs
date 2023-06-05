@@ -95,6 +95,7 @@ pub struct ConnectionConfig {
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
     pub min_timeout: Duration,
+    pub max_timeout: Duration,
     pub target_delay: Duration,
 }
 
@@ -106,6 +107,7 @@ impl Default for ConnectionConfig {
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
+            max_timeout: congestion::DEFAULT_MAX_TIMEOUT,
             target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
         }
     }
@@ -117,6 +119,7 @@ impl From<ConnectionConfig> for congestion::Config {
             max_packet_size_bytes: u32::from(value.max_packet_size),
             initial_timeout: value.initial_timeout,
             min_timeout: value.min_timeout,
+            max_timeout: value.max_timeout,
             target_delay_micros: value.target_delay.as_micros() as u32,
             ..Default::default()
         }
