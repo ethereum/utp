@@ -95,17 +95,20 @@ pub struct ConnectionConfig {
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
     pub min_timeout: Duration,
+    pub max_timeout: Duration,
     pub target_delay: Duration,
 }
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
+        let max_idle_timeout = Duration::from_secs(10);
         Self {
             max_conn_attempts: 3,
-            max_idle_timeout: Duration::from_secs(10),
+            max_idle_timeout,
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
+            max_timeout: max_idle_timeout,
             target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
         }
     }
@@ -117,6 +120,7 @@ impl From<ConnectionConfig> for congestion::Config {
             max_packet_size_bytes: u32::from(value.max_packet_size),
             initial_timeout: value.initial_timeout,
             min_timeout: value.min_timeout,
+            max_timeout: value.max_timeout,
             target_delay_micros: value.target_delay.as_micros() as u32,
             ..Default::default()
         }
@@ -136,6 +140,7 @@ pub struct Connection<const N: usize, P> {
     readable: Notify,
     pending_writes: VecDeque<Write>,
     writable: Notify,
+    latest_timeout: Option<Instant>,
 }
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
@@ -176,6 +181,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
@@ -642,7 +648,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     return;
                 }
 
-                sent_packets.on_timeout();
+                // To prevent timeout amplification in the event that a batch of packets sent near
+                // the same time all timeout, we only register a new timeout if the time elapsed
+                // since the latest timeout is greater than the existing timeout.
+                //
+                // For example, if the current congestion control timeout is 1s, then we only
+                // register a new timeout if the time elapsed since the latest registered timeout
+                // is greater than 1s.
+                let timeout = match self.latest_timeout {
+                    Some(latest) => latest.elapsed() > sent_packets.timeout(),
+                    None => true,
+                };
+                if timeout {
+                    sent_packets.on_timeout();
+                    self.latest_timeout = Some(Instant::now());
+                }
 
                 // TODO: Limit number of retransmissions.
                 let recv_window = recv_buf.available() as u32;
@@ -1125,6 +1145,7 @@ mod test {
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
