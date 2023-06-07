@@ -638,14 +638,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         self.state = State::Closed { err: Some(err) };
                     } else {
                         let seq = *syn;
-                        *attempts += 1;
+                        let new_attempt_count = *attempts + 1;
+                        *attempts = new_attempt_count;
                         let packet = self.syn_packet(seq);
                         let _ = self.socket_events.send(SocketEvent::Outgoing((
                             packet.clone(),
                             self.cid.peer.clone(),
                         )));
+                        let timeout = self.config.initial_timeout * 2u32.pow(new_attempt_count.try_into().unwrap());
                         self.unacked
-                            .insert_at(seq, packet, self.config.initial_timeout);
+                            .insert_at(seq, packet, timeout);
                     }
                 }
                 Endpoint::Acceptor(..) => {}
