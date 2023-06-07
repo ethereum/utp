@@ -91,6 +91,9 @@ pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
     pub max_packet_size: u16,
+    /// The maximum number of connection attempts to make before giving up.
+    /// Note: if the max_idle_timeout is set too low, then the connection may time out before all
+    /// these attempts can be executed.
     pub max_conn_attempts: usize,
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
@@ -622,13 +625,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     } else {
                         let seq = *syn;
                         *attempts += 1;
+
+                        // Double previous timeout for exponential backoff on each attempt
+                        let timeout = self.config.initial_timeout * 2u32.pow(*attempts as u32);
+                        self.unacked.insert_at(seq, packet, timeout);
+
+                        // Re-send SYN packet.
                         let packet = self.syn_packet(seq);
-                        let _ = self.socket_events.send(SocketEvent::Outgoing((
-                            packet.clone(),
-                            self.cid.peer.clone(),
-                        )));
-                        self.unacked
-                            .insert_at(seq, packet, self.config.initial_timeout);
+                        let _ = self
+                            .socket_events
+                            .send(SocketEvent::Outgoing((packet, self.cid.peer.clone())));
                     }
                 }
                 Endpoint::Acceptor(..) => {}
