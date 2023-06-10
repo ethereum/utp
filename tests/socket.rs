@@ -7,6 +7,8 @@ use utp_rs::cid;
 use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 
+const TEST_DATA: &[u8] = &[0xf0; 1_000_000];
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn socket() {
     tracing_subscriber::fmt::init();
@@ -56,9 +58,6 @@ async fn initiate_transfer(
         peer: recv_addr,
     };
 
-    let data = vec![0xfe; 1_000_000];
-    let data_recv = data.clone();
-
     let recv_handle = tokio::spawn(async move {
         let mut stream = recv.accept_with_cid(recv_cid, conn_config).await.unwrap();
         let mut buf = vec![];
@@ -72,14 +71,14 @@ async fn initiate_transfer(
         };
         tracing::info!(cid.send = %recv_cid.send, cid.recv = %recv_cid.recv, "read {n} bytes from uTP stream");
 
-        assert_eq!(n, data_recv.len());
-        assert_eq!(buf, data_recv);
+        assert_eq!(n, TEST_DATA.len());
+        assert_eq!(buf, TEST_DATA);
     });
 
     let send_handle = tokio::spawn(async move {
         let mut stream = send.connect_with_cid(send_cid, conn_config).await.unwrap();
-        let n = stream.write(&data).await.unwrap();
-        assert_eq!(n, data.len());
+        let n = stream.write(TEST_DATA).await.unwrap();
+        assert_eq!(n, TEST_DATA.len());
 
         stream.shutdown().unwrap();
     });
