@@ -24,8 +24,8 @@ async fn socket() {
     let send = Arc::new(send);
     let mut handles = vec![];
 
-    // start 50 transfers, step by two to avoid cid collisions
     for i in 0..1500 {
+        // step up cid by two to avoid collisions
         let handle = initiate_transfer(i * 2, recv_addr, recv.clone(), send_addr, send.clone()).await;
         handles.push(handle.0);
         handles.push(handle.1);
