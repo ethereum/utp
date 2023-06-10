@@ -342,6 +342,7 @@ where
 
         self.pause_while_stressed().await;
 
+        let cid_info = format!("{:?}", cid);
         let stream = UtpStream::new(
             cid,
             config,
@@ -360,7 +361,7 @@ where
                 Err(err)
             }
             Err(err) => {
-                tracing::error!(?err, "Failed to open connection with cid");
+                tracing::error!(?err, "Failed to open connection with {cid_info}");
                 Err(io::Error::from(io::ErrorKind::TimedOut))
             },
         }
