@@ -7,7 +7,7 @@ use utp_rs::cid;
 use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn socket() {
     tracing_subscriber::fmt::init();
 
@@ -23,7 +23,7 @@ async fn socket() {
     let mut handles = vec![];
 
     // start 50 transfers, step by two to avoid cid collisions
-    for i in 0..200 {
+    for i in 0..1500 {
         let handle = initiate_transfer(i * 2, recv_addr, recv.clone(), send_addr, send.clone()).await;
         handles.push(handle.0);
         handles.push(handle.1);
