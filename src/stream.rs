@@ -1,6 +1,6 @@
 use std::io;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
@@ -16,6 +16,8 @@ pub struct UtpStream<P> {
     cid: ConnectionId<P>,
     reads: mpsc::UnboundedSender<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
+    /// channel to notify if connection becomes stressed or unstressed
+    stress_rx: watch::Receiver<bool>,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -31,8 +33,13 @@ where
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
+
+        // If a connection is stressed, it is not keeping up with the receiver, due to local stress
+        // Too many stressed connections will cause idle timeouts and connection timeouts. So use
+        // stress as a signal to apply backpressure, against creating new connections.
+        let (stress_tx, stress_rx) = watch::channel(true);
         let mut conn =
-            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
+            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events, stress_tx);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
@@ -47,12 +54,17 @@ where
             cid,
             reads: reads_tx,
             writes: writes_tx,
+            stress_rx,
             shutdown: Some(shutdown_tx),
         }
     }
 
     pub fn cid(&self) -> &ConnectionId<P> {
         &self.cid
+    }
+
+    pub fn stress_rx(&self) -> watch::Receiver<bool> {
+        self.stress_rx.clone()
     }
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {

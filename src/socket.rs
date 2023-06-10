@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::thread::available_parallelism;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
@@ -28,6 +30,8 @@ pub struct UtpSocket<P> {
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+    // TODO strip connection stress out when connection exits
+    connection_stress: Arc<RwLock<Vec<watch::Receiver<bool>>>>,
 }
 
 impl UtpSocket<SocketAddr> {
@@ -44,7 +48,7 @@ where
 {
     pub fn with_socket<S>(socket: S) -> Self
     where
-        S: AsyncUdpSocket<P> + 'static,
+        S: AsyncUdpSocket<P> + 'static + std::fmt::Debug,
     {
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
@@ -64,7 +68,23 @@ where
             cid_gen,
             accepts: accepts_tx,
             socket_events: socket_event_tx.clone(),
+            connection_stress: Arc::new(RwLock::new(Vec::new())),
         };
+
+        let conn_stress = Arc::clone(&utp.connection_stress);
+        let socket_str = format!("{socket:?}");
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let conn_stress = conn_stress.read().unwrap();
+                let total_conns = conn_stress.len();
+                if total_conns == 0 {
+                    continue;
+                }
+                let num_stressed = conn_stress.iter().map(|receiver| *receiver.borrow()).filter(|stress| *stress).count();
+                tracing::info!("{num_stressed}/{total_conns} connections are stressed on {socket_str}");
+            }
+        });
 
         let socket = Arc::new(socket);
         tokio::spawn(async move {
@@ -244,6 +264,20 @@ where
         }
     }
 
+    async fn pause_while_stressed(&self) {
+        let target_stressed_workers = available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(2).unwrap()).get();
+        let mut num_stressed = target_stressed_workers + 1;
+
+        while num_stressed > target_stressed_workers {
+            num_stressed = self.connection_stress.read().unwrap().iter().map(|receiver| *receiver.borrow()).filter(|stress| *stress).count();
+            if num_stressed <= target_stressed_workers {
+                break;
+            }
+            // wait for the stress to be relieved, for the target delay
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
@@ -253,6 +287,8 @@ where
             self.conns.write().unwrap().insert(cid.clone(), events_tx);
         }
 
+        self.pause_while_stressed().await;
+
         let stream = UtpStream::new(
             cid,
             config,
@@ -261,6 +297,8 @@ where
             events_rx,
             connected_tx,
         );
+
+        self.connection_stress.write().unwrap().push(stream.stress_rx());
 
         match connected_rx.await {
             Ok(Ok(..)) => Ok(stream),
@@ -288,6 +326,8 @@ where
             self.conns.write().unwrap().insert(cid.clone(), events_tx);
         }
 
+        self.pause_while_stressed().await;
+
         let stream = UtpStream::new(
             cid,
             config,
@@ -296,6 +336,8 @@ where
             events_rx,
             connected_tx,
         );
+
+        self.connection_stress.write().unwrap().push(stream.stress_rx());
 
         match connected_rx.await {
             Ok(Ok(..)) => Ok(stream),

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use delay_map::HashMapDelay;
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify, watch};
 
 use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::congestion;
@@ -141,6 +141,7 @@ pub struct Connection<const N: usize, P> {
     pending_writes: VecDeque<Write>,
     writable: Notify,
     latest_timeout: Option<Instant>,
+    stress_tx: watch::Sender<bool>,
 }
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
@@ -150,6 +151,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+        stress_tx: watch::Sender<bool>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
@@ -182,6 +184,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
             latest_timeout: None,
+            stress_tx,
         }
     }
 
@@ -337,6 +340,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 break;
             }
         }
+        self.stress_tx.send_replace(false);
     }
 
     fn shutdown(&mut self) {
@@ -519,6 +523,12 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             );
             seq_num = seq_num.wrapping_add(1);
         }
+        // Channel is no longer stressed, notify watchers
+        let was_stressed = *self.stress_tx.borrow();
+        if was_stressed {
+            // always fills up window, so local stress seems to be gone
+            self.stress_tx.send_replace(false);
+        }
     }
 
     fn on_write(&mut self, write: Write) {
@@ -645,7 +655,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                             packet.clone(),
                             self.cid.peer.clone(),
                         )));
-                        let timeout = self.config.initial_timeout * 2u32.pow(new_attempt_count.try_into().unwrap());
+                        let timeout = self.config.initial_timeout * 2u32.pow((new_attempt_count-1).try_into().unwrap());
+                        tracing::debug!("Timeout on SYN, retrying in {}s", timeout.as_secs());
                         self.unacked
                             .insert_at(seq, packet, timeout);
                     }
@@ -666,6 +677,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 // already been established.
                 if std::matches!(packet.packet_type(), PacketType::Syn) {
                     return;
+                }
+                if !*self.stress_tx.borrow() {
+                    self.stress_tx.send_replace(true);
                 }
 
                 // To prevent timeout amplification in the event that a batch of packets sent near
@@ -853,9 +867,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 Endpoint::Acceptor(..) => {}
             },
-            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
+            State::Established { send_buf, sent_packets, .. } | State::Closing { send_buf, sent_packets, .. } => {
                 let range = sent_packets.seq_num_range();
                 if range.contains(ack_num) {
+                    // If connection is not already marked as stressed, then
+                    // mark it as stressed now: the full window isn't being used anymore
+                    if !*self.stress_tx.borrow() {
+                        let is_stressed = !send_buf.is_empty();
+                        self.stress_tx.send_replace(is_stressed);
+                    }
+
                     // Do not ACK if ACK num corresponds to initial packet.
                     if ack_num != range.start() {
                         sent_packets.on_ack(ack_num, selective_ack, delay, now);
@@ -1156,6 +1177,8 @@ mod test {
             peer,
         };
 
+        let (stress_tx, _) = watch::channel(true);
+
         Connection {
             state: State::Connecting(Some(connected)),
             cid,
@@ -1170,6 +1193,7 @@ mod test {
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
             latest_timeout: None,
+            stress_tx,
         }
     }
 
