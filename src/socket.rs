@@ -32,6 +32,7 @@ pub struct UtpSocket<P> {
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
     // TODO strip connection stress out when connection exits
     connection_stress: Arc<RwLock<Vec<watch::Receiver<bool>>>>,
+    target_parallelism: usize,
 }
 
 impl UtpSocket<SocketAddr> {
@@ -63,12 +64,17 @@ where
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
+        let num_cores = available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(4).unwrap()).get();
+        let target_parallelism = num_cores / 2;
+        tracing::info!("Set target parallelism to {target_parallelism}");
+
         let utp = Self {
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
             socket_events: socket_event_tx.clone(),
             connection_stress: Arc::new(RwLock::new(Vec::new())),
+            target_parallelism,
         };
 
         let conn_stress = Arc::clone(&utp.connection_stress);
@@ -264,17 +270,25 @@ where
         }
     }
 
+    fn get_num_stressed(&self) -> usize {
+        self.connection_stress
+            .read()
+            .unwrap()
+            .iter()
+            .map(|receiver| *receiver.borrow())
+            .filter(|stress| *stress)
+            .count()
+    }
+
     async fn pause_while_stressed(&self) {
-        let target_stressed_workers = available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(2).unwrap()).get();
-        let mut num_stressed = target_stressed_workers + 1;
+        let target_stressed_workers = self.target_parallelism;
+        let mut num_stressed = self.get_num_stressed();
 
         while num_stressed > target_stressed_workers {
-            num_stressed = self.connection_stress.read().unwrap().iter().map(|receiver| *receiver.borrow()).filter(|stress| *stress).count();
-            if num_stressed <= target_stressed_workers {
-                break;
-            }
             // wait for the stress to be relieved, for the target delay
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let over_stress = (num_stressed - target_stressed_workers) as u64;
+            tokio::time::sleep(Duration::from_millis(over_stress * 50)).await;
+            num_stressed = self.get_num_stressed();
         }
     }
 
