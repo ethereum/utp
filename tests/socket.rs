@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use utp_rs::cid;
 use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 
@@ -22,26 +21,15 @@ async fn socket() {
     let send = UtpSocket::bind(send_addr).await.unwrap();
     let send = Arc::new(send);
 
-    let recv_one_cid = cid::ConnectionId {
-        send: 100,
-        recv: 101,
-        peer: send_addr,
-    };
-    let send_one_cid = cid::ConnectionId {
-        send: 101,
-        recv: 100,
-        peer: recv_addr,
-    };
-
     let recv_arc = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
         let mut stream = recv_arc
-            .accept_with_cid(recv_one_cid, conn_config)
+            .accept_with_cid(101, send_addr, conn_config)
             .await
             .unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-        tracing::info!(cid.send = %recv_one_cid.send, cid.recv = %recv_one_cid.recv, "read {n} bytes from uTP stream");
+        tracing::info!(cid.send = 100, cid.recv = 101, "read {n} bytes from uTP stream");
 
         assert_eq!(n, data_one_recv.len());
         assert_eq!(buf, data_one_recv);
@@ -50,7 +38,7 @@ async fn socket() {
     let send_arc = Arc::clone(&send);
     tokio::spawn(async move {
         let mut stream = send_arc
-            .connect_with_cid(send_one_cid, conn_config)
+            .connect_with_cid(101, recv_addr, conn_config)
             .await
             .unwrap();
         let n = stream.write(&data_one).await.unwrap();
@@ -62,25 +50,14 @@ async fn socket() {
     let data_two = vec![0xfe; 8192 * 2 * 2];
     let data_two_recv = data_two.clone();
 
-    let recv_two_cid = cid::ConnectionId {
-        send: 200,
-        recv: 201,
-        peer: send_addr,
-    };
-    let send_two_cid = cid::ConnectionId {
-        send: 201,
-        recv: 200,
-        peer: recv_addr,
-    };
-
     let recv_two_handle = tokio::spawn(async move {
         let mut stream = recv
-            .accept_with_cid(recv_two_cid, conn_config)
+            .accept_with_cid(201, send_addr, conn_config)
             .await
             .unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-        tracing::info!(cid.send = %recv_two_cid.send, cid.recv = %recv_two_cid.recv, "read {n} bytes from uTP stream");
+        tracing::info!(cid.send = 200, cid.recv = 201, "read {n} bytes from uTP stream");
 
         assert_eq!(n, data_two_recv.len());
         assert_eq!(buf, data_two_recv);
@@ -88,7 +65,7 @@ async fn socket() {
 
     tokio::spawn(async move {
         let mut stream = send
-            .connect_with_cid(send_two_cid, conn_config)
+            .connect_with_cid(201, recv_addr, conn_config)
             .await
             .unwrap();
         let n = stream.write(&data_two).await.unwrap();

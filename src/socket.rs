@@ -225,9 +225,16 @@ where
 
     pub async fn accept_with_cid(
         &self,
-        cid: ConnectionId<P>,
+        cid_recv: u16,
+        cid_peer: P,
         config: ConnectionConfig,
     ) -> io::Result<UtpStream<P>> {
+        let cid = ConnectionId {
+            send: cid_recv.wrapping_sub(1),
+            recv: cid_recv,
+            peer: cid_peer,
+        };
+
         let (stream_tx, stream_rx) = oneshot::channel();
         let accept = Accept {
             stream: stream_tx,
@@ -269,9 +276,16 @@ where
 
     pub async fn connect_with_cid(
         &self,
-        cid: ConnectionId<P>,
+        cid_send: u16,
+        cid_peer: P,
         config: ConnectionConfig,
     ) -> io::Result<UtpStream<P>> {
+        let cid = ConnectionId {
+            send: cid_send,
+            recv: cid_send.wrapping_sub(1),
+            peer: cid_peer,
+        };
+
         if self.conns.read().unwrap().contains_key(&cid) {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
