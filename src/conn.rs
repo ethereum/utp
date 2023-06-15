@@ -88,14 +88,25 @@ enum State<const N: usize> {
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
+/// The configuration for a single uTP connection (i.e. stream).
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
+    /// The maximum packet size that the connection can transmit.
     pub max_packet_size: u16,
+    /// The maximum number of connection attempts to make for an outgoing connection.
     pub max_conn_attempts: usize,
+    /// The maximum duration that the connection will remain idle before termination. The idle
+    /// countdown resets upon a local write on the connection and upon receipt of a remote packet.
     pub max_idle_timeout: Duration,
+    /// The initial timeout to establish the connection.
     pub initial_timeout: Duration,
+    /// The minimum timeout that can be assigned to an outgoing packet.
     pub min_timeout: Duration,
+    /// The maximum timeout that can be assigned to an outgoing packet.
+    ///
+    /// Note: In most circumstances, `max_timeout` should be strictly less than `max_idle_timeout`.
     pub max_timeout: Duration,
+    /// The target packet delay (used to calibrate congestion control).
     pub target_delay: Duration,
 }
 

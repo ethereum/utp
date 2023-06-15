@@ -1,10 +1,15 @@
 use std::collections::HashMap;
 use std::io;
+use std::marker::Unpin;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
+use delay_map::HashMapDelay;
+use futures::StreamExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::time::DelayQueue;
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
@@ -12,6 +17,8 @@ use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
+
+const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::MAX;
 
 type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
@@ -25,7 +32,7 @@ const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
-    accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
+    accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>, Instant)>,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
 }
 
@@ -39,7 +46,7 @@ impl UtpSocket<SocketAddr> {
 
 impl<P> UtpSocket<P>
 where
-    P: ConnectionPeer + 'static,
+    P: ConnectionPeer + Unpin + 'static,
 {
     pub fn with_socket<S>(socket: S) -> Self
     where
@@ -50,8 +57,9 @@ where
 
         let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
-        let awaiting: HashMap<ConnectionId<P>, Accept<P>> = HashMap::new();
-        let awaiting = Arc::new(RwLock::new(awaiting));
+        let mut awaiting_cid: HashMapDelay<ConnectionId<P>, Accept<P>> =
+            HashMapDelay::new(DEFAULT_ACCEPT_TIMEOUT);
+        let mut awaiting: DelayQueue<Accept<P>> = DelayQueue::new();
 
         let mut incoming_conns = HashMap::new();
 
@@ -92,31 +100,42 @@ where
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
                                     let cid = cid_from_packet(&packet, &src, true);
-                                    let mut awaiting = awaiting.write().unwrap();
 
-                                    // If there was an awaiting connection with the CID, then
-                                    // create a new stream for that connection. Otherwise, add the
-                                    // connection to the incoming connections.
-                                    if let Some(accept) = awaiting.remove(&cid) {
-                                        let (connected_tx, connected_rx) = oneshot::channel();
-                                        let (events_tx, events_rx) = mpsc::unbounded_channel();
-
-                                        conns.insert(cid.clone(), events_tx);
-
-                                        let stream = UtpStream::new(
-                                            cid,
-                                            accept.config,
-                                            Some(packet),
-                                            socket_event_tx.clone(),
-                                            events_rx,
-                                            connected_tx
-                                        );
-
-                                        tokio::spawn(async move {
-                                            Self::await_connected(stream, accept, connected_rx).await
-                                        });
+                                    // First check whether there is a pending accept that specifies
+                                    // `cid`. If no pending accept was found, then try to fulfill
+                                    // the pending accept with the nearest timeout deadline.
+                                    let accept = if let Some(accept) = awaiting_cid.remove(&cid) {
+                                        Some(accept)
                                     } else {
-                                        incoming_conns.insert(cid, packet);
+                                        awaiting.peek().map(|key| awaiting.remove(&key).into_inner())
+                                    };
+
+                                    // If there was a suitable waiting accept, then create a new
+                                    // stream for the connection. Otherwise, add the CID and SYN to
+                                    // the incoming connections.
+                                    match accept {
+                                        Some(accept) => {
+                                            let (connected_tx, connected_rx) = oneshot::channel();
+                                            let (events_tx, events_rx) = mpsc::unbounded_channel();
+
+                                            conns.insert(cid.clone(), events_tx);
+
+                                            let stream = UtpStream::new(
+                                                cid,
+                                                accept.config,
+                                                Some(packet),
+                                                socket_event_tx.clone(),
+                                                events_rx,
+                                                connected_tx
+                                            );
+
+                                            tokio::spawn(async move {
+                                                Self::await_connected(stream, accept, connected_rx).await
+                                            });
+                                        }
+                                        None => {
+                                            incoming_conns.insert(cid, packet);
+                                        }
                                     }
                                 } else {
                                     tracing::debug!(
@@ -151,7 +170,26 @@ where
                             }
                         }
                     }
-                    Some((accept, cid)) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
+                    Some((accept, cid, deadline)) = accepts_rx.recv() => {
+                        // If the deadline has passed, then send the timeout to the acceptor.
+                        let now = Instant::now();
+                        if deadline < now {
+                            // Drop the accept sender. A timeout error will be sent back to the
+                            // caller.
+                            tracing::warn!("accept timed out, dropping accept attempt");
+                            continue;
+                        }
+
+                        // Compute the timeout duration. Given the check above, the subtraction
+                        // cannot fail.
+                        let timeout = deadline - now;
+
+                        // If there are no incoming connections, then queue the accept.
+                        if incoming_conns.is_empty() {
+                            awaiting.insert(accept, timeout);
+                            continue;
+                        }
+
                         let (cid, syn) = match cid {
                             // If a CID was given, then check for an incoming connection with that
                             // CID. If one is found, then use that connection. Otherwise, add the
@@ -160,13 +198,13 @@ where
                                 if let Some(syn) = incoming_conns.remove(&cid) {
                                     (cid, syn)
                                 } else {
-                                    awaiting.write().unwrap().insert(cid, accept);
+                                    awaiting_cid.insert_at(cid, accept, timeout);
                                     continue;
                                 }
                             }
                             // If a CID was not given, then pull an incoming connection, and use
                             // that connection's CID. An incoming connection is known to exist
-                            // because of the condition in the `select` arm.
+                            // because of the check above.
                             None => {
                                 let cid = incoming_conns.keys().next().unwrap().clone();
                                 let syn = incoming_conns.remove(&cid).unwrap();
@@ -193,9 +231,18 @@ where
                             connected_tx,
                         );
 
+
                         tokio::spawn(async move {
                             Self::await_connected(stream, accept, connected_rx).await
                         });
+                    }
+                    Some(Ok(_accept)) = awaiting_cid.next() => {
+                        // The accept timed out, so drop it.
+                        continue
+                    }
+                    Some(_accept) = awaiting.next() => {
+                        // The accept timed out, so drop it.
+                        continue
                     }
                 }
             }
@@ -214,8 +261,10 @@ where
             stream: stream_tx,
             config,
         };
+
+        let deadline = Instant::now() + accept.config.initial_timeout;
         self.accepts
-            .send((accept, None))
+            .send((accept, None, deadline))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
@@ -233,8 +282,10 @@ where
             stream: stream_tx,
             config,
         };
+
+        let deadline = Instant::now() + accept.config.initial_timeout;
         self.accepts
-            .send((accept, Some(cid)))
+            .send((accept, Some(cid), deadline))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
