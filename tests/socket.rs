@@ -16,10 +16,11 @@ async fn socket() {
 
     let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
     let send_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
+    let max_outbound_connections = 20;
 
-    let recv = UtpSocket::bind(recv_addr).await.unwrap();
+    let recv = UtpSocket::bind(recv_addr, max_outbound_connections).await.unwrap();
     let recv = Arc::new(recv);
-    let send = UtpSocket::bind(send_addr).await.unwrap();
+    let send = UtpSocket::bind(send_addr, max_outbound_connections).await.unwrap();
     let send = Arc::new(send);
     let mut handles = vec![];
 

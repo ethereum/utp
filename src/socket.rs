@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
@@ -27,12 +27,17 @@ pub struct UtpSocket<P> {
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+    /// Maximum allowed connections, which only restricts outbound connections, but counts all
+    /// active connections.
+    max_conns: usize,
+    /// Notification when any connection is dropped. Used by outbound connections waiting for room
+    conn_dropped: Arc<Notify>,
 }
 
 impl UtpSocket<SocketAddr> {
-    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub async fn bind(addr: SocketAddr, max_conns: usize) -> io::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
-        let socket = Self::with_socket(socket);
+        let socket = Self::with_socket(socket, max_conns);
         Ok(socket)
     }
 }
@@ -41,7 +46,7 @@ impl<P> UtpSocket<P>
 where
     P: ConnectionPeer + 'static,
 {
-    pub fn with_socket<S>(socket: S) -> Self
+    pub fn with_socket<S>(socket: S, max_conns: usize) -> Self
     where
         S: AsyncUdpSocket<P> + 'static,
     {
@@ -58,11 +63,14 @@ where
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
+        let conn_dropped = Arc::new(Notify::new());
         let utp = Self {
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
             socket_events: socket_event_tx.clone(),
+            max_conns,
+            conn_dropped: conn_dropped.clone(),
         };
 
         let socket = Arc::new(socket);
@@ -195,6 +203,7 @@ where
                             SocketEvent::Shutdown(cid) => {
                                 tracing::debug!(%cid.send, %cid.recv, "uTP conn shutdown");
                                 conns.write().unwrap().remove(&cid);
+                                conn_dropped.notify_one();
                             }
                         }
                     }
@@ -243,14 +252,36 @@ where
         }
     }
 
+    async fn add_outbound_connection(&self, cid: &ConnectionId<P>, events_tx: mpsc::UnboundedSender<StreamEvent>) {
+        loop {
+            let num_connections = self.conns.read().unwrap().len();
+            if num_connections < self.max_conns {
+                break;
+            }
+            self.conn_dropped.notified().await;
+            // Because inbound connections increase the number of connections, we need to
+            // check again if there is space available.
+        }
+        let new_num_connections = {
+            let mut conns = self.conns.write().unwrap();
+            conns.insert(cid.clone(), events_tx);
+            conns.len()
+        };
+        // Because notify_one() calls combine if two are called before this task is woken up,
+        // we need to check again if there is space available, to wake the next task.
+        if new_num_connections < self.max_conns {
+            self.conn_dropped.notify_one();
+        }
+    }
+
+    /// Note that this will pause if there are too many connections, don't expect it to send the
+    /// SYN packet immediately.
     pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
-        {
-            self.conns.write().unwrap().insert(cid.clone(), events_tx);
-        }
+        self.add_outbound_connection(&cid, events_tx).await;
 
         let stream = UtpStream::new(
             cid,
@@ -268,6 +299,8 @@ where
         }
     }
 
+    /// Note that this will pause if there are too many connections, don't expect it to send the
+    /// SYN packet immediately.
     pub async fn connect_with_cid(
         &self,
         cid: ConnectionId<P>,
@@ -283,9 +316,7 @@ where
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
-        {
-            self.conns.write().unwrap().insert(cid.clone(), events_tx);
-        }
+        self.add_outbound_connection(&cid, events_tx).await;
 
         let stream = UtpStream::new(
             cid,
