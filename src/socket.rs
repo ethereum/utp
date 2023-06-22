@@ -70,6 +70,7 @@ where
             let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
                 tokio::select! {
+                    biased;
                     Ok((n, src)) = socket.recv_from(&mut buf) => {
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
@@ -130,27 +131,6 @@ where
                             },
                         }
                     }
-                    Some(event) = socket_event_rx.recv() => {
-                        match event {
-                            SocketEvent::Outgoing((packet, dst)) => {
-                                let encoded = packet.encode();
-                                if let Err(err) = socket.send_to(&encoded, &dst).await {
-                                    tracing::debug!(
-                                        %err,
-                                        cid = %packet.conn_id(),
-                                        packet = ?packet.packet_type(),
-                                        seq = %packet.seq_num(),
-                                        ack = %packet.ack_num(),
-                                        "unable to send uTP packet over socket"
-                                    );
-                                }
-                            }
-                            SocketEvent::Shutdown(cid) => {
-                                tracing::debug!(%cid.send, %cid.recv, "uTP conn shutdown");
-                                conns.write().unwrap().remove(&cid);
-                            }
-                        }
-                    }
                     Some((accept, cid)) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
                         let (cid, syn) = match cid {
                             // If a CID was given, then check for an incoming connection with that
@@ -196,6 +176,27 @@ where
                         tokio::spawn(async move {
                             Self::await_connected(stream, accept, connected_rx).await
                         });
+                    }
+                    Some(event) = socket_event_rx.recv() => {
+                        match event {
+                            SocketEvent::Outgoing((packet, dst)) => {
+                                let encoded = packet.encode();
+                                if let Err(err) = socket.send_to(&encoded, &dst).await {
+                                    tracing::debug!(
+                                        %err,
+                                        cid = %packet.conn_id(),
+                                        packet = ?packet.packet_type(),
+                                        seq = %packet.seq_num(),
+                                        ack = %packet.ack_num(),
+                                        "unable to send uTP packet over socket"
+                                    );
+                                }
+                            }
+                            SocketEvent::Shutdown(cid) => {
+                                tracing::debug!(%cid.send, %cid.recv, "uTP conn shutdown");
+                                conns.write().unwrap().remove(&cid);
+                            }
+                        }
                     }
                 }
             }
