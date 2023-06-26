@@ -16,6 +16,7 @@ use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
 use crate::sent::SentPackets;
 use crate::seq::CircularRangeInclusive;
+use crate::socket;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
@@ -90,7 +91,6 @@ pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
-    pub max_packet_size: u16,
     pub max_conn_attempts: usize,
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
@@ -105,7 +105,6 @@ impl Default for ConnectionConfig {
         Self {
             max_conn_attempts: 3,
             max_idle_timeout,
-            max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
             max_timeout: max_idle_timeout,
@@ -117,7 +116,6 @@ impl Default for ConnectionConfig {
 impl From<ConnectionConfig> for congestion::Config {
     fn from(value: ConnectionConfig) -> Self {
         Self {
-            max_packet_size_bytes: u32::from(value.max_packet_size),
             initial_timeout: value.initial_timeout,
             min_timeout: value.min_timeout,
             max_timeout: value.max_timeout,
@@ -131,6 +129,7 @@ pub struct Connection<const N: usize, P> {
     state: State<N>,
     cid: ConnectionId<P>,
     config: ConnectionConfig,
+    socket_config: socket::SocketConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
@@ -147,6 +146,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     pub fn new(
         cid: ConnectionId<P>,
         config: ConnectionConfig,
+        socket_config: socket::SocketConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
@@ -172,6 +172,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             state: State::Connecting(Some(connected)),
             cid,
             config,
+            socket_config,
             endpoint,
             peer_ts_diff,
             peer_recv_window,
@@ -216,7 +217,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 let recv_buf = ReceiveBuffer::new(syn);
                 let send_buf = SendBuffer::new();
 
-                let congestion_ctrl = congestion::Controller::new(self.config.into());
+                let mut congestion_config: congestion::Config = self.config.into();
+                congestion_config.max_packet_size_bytes = u32::from(self.socket_config.max_packet_size);
+                let congestion_ctrl = congestion::Controller::new(congestion_config);
 
                 // NOTE: We initialize with the sequence number of the SYN-ACK minus 1 because the
                 // SYN-ACK contains the incremented sequence number (i.e. the next sequence
@@ -448,7 +451,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         let mut payloads = Vec::new();
         while window > 0 {
             // TODO: Do not rely on approximation here. Account for header and extensions.
-            let max_data_size = cmp::min(window, usize::from(self.config.max_packet_size - 64));
+            let max_data_size = cmp::min(window, usize::from(self.socket_config.max_packet_size - 64));
             let mut data = vec![0; max_data_size];
             let n = send_buf.read(&mut data).unwrap();
             if n == 0 {
@@ -1136,6 +1139,7 @@ mod test {
             state: State::Connecting(Some(connected)),
             cid,
             config: ConnectionConfig::default(),
+            socket_config: socket::SocketConfig::default(),
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,

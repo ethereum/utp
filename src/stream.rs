@@ -7,6 +7,7 @@ use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::conn;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
+use crate::socket;
 
 /// The size of the send and receive buffers.
 // TODO: Make the buffer size configurable.
@@ -25,14 +26,15 @@ where
 {
     pub(crate) fn new(
         cid: ConnectionId<P>,
-        config: conn::ConnectionConfig,
+        conn_config: conn::ConnectionConfig,
+        socket_config: socket::SocketConfig,
         syn: Option<Packet>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
         let mut conn =
-            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
+            conn::Connection::<BUF, P>::new(cid.clone(), conn_config, socket_config, syn, connected, socket_events);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();

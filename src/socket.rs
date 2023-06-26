@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
+use crate::congestion;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
@@ -22,7 +23,21 @@ struct Accept<P> {
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SocketConfig {
+    pub max_packet_size: u16,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
+        }
+    }
+}
+
 pub struct UtpSocket<P> {
+    pub config: SocketConfig,
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
@@ -31,8 +46,12 @@ pub struct UtpSocket<P> {
 
 impl UtpSocket<SocketAddr> {
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_config(addr, SocketConfig::default()).await
+    }
+
+    pub async fn bind_with_config(addr: SocketAddr, config: SocketConfig) -> io::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
-        let socket = Self::with_socket(socket);
+        let socket = Self::with_socket(socket, config);
         Ok(socket)
     }
 }
@@ -41,7 +60,7 @@ impl<P> UtpSocket<P>
 where
     P: ConnectionPeer + 'static,
 {
-    pub fn with_socket<S>(socket: S) -> Self
+    pub fn with_socket<S>(socket: S, config: SocketConfig) -> Self
     where
         S: AsyncUdpSocket<P> + 'static,
     {
@@ -59,6 +78,7 @@ where
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
         let utp = Self {
+            config,
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
@@ -66,6 +86,7 @@ where
         };
 
         let socket = Arc::new(socket);
+        let socket_config = utp.config;
         tokio::spawn(async move {
             let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
@@ -107,6 +128,7 @@ where
                                         let stream = UtpStream::new(
                                             cid,
                                             accept.config,
+                                            socket_config,
                                             Some(packet),
                                             socket_event_tx.clone(),
                                             events_rx,
@@ -167,6 +189,7 @@ where
                         let stream = UtpStream::new(
                             cid,
                             accept.config,
+                            socket_config,
                             Some(syn),
                             socket_event_tx.clone(),
                             events_rx,
@@ -255,6 +278,7 @@ where
         let stream = UtpStream::new(
             cid,
             config,
+            self.config,
             None,
             self.socket_events.clone(),
             events_rx,
@@ -290,6 +314,7 @@ where
         let stream = UtpStream::new(
             cid,
             config,
+            self.config,
             None,
             self.socket_events.clone(),
             events_rx,
