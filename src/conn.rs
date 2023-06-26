@@ -9,6 +9,7 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::config::UtpConfig;
 use crate::congestion;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
@@ -88,49 +89,10 @@ enum State<const N: usize> {
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
-#[derive(Clone, Copy, Debug)]
-pub struct ConnectionConfig {
-    pub max_packet_size: u16,
-    pub max_conn_attempts: usize,
-    pub max_idle_timeout: Duration,
-    pub initial_timeout: Duration,
-    pub min_timeout: Duration,
-    pub max_timeout: Duration,
-    pub target_delay: Duration,
-}
-
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        let max_idle_timeout = Duration::from_secs(10);
-        Self {
-            max_conn_attempts: 3,
-            max_idle_timeout,
-            max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
-            initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
-            min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
-            max_timeout: max_idle_timeout,
-            target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
-        }
-    }
-}
-
-impl From<ConnectionConfig> for congestion::Config {
-    fn from(value: ConnectionConfig) -> Self {
-        Self {
-            max_packet_size_bytes: u32::from(value.max_packet_size),
-            initial_timeout: value.initial_timeout,
-            min_timeout: value.min_timeout,
-            max_timeout: value.max_timeout,
-            target_delay_micros: value.target_delay.as_micros() as u32,
-            ..Default::default()
-        }
-    }
-}
-
 pub struct Connection<const N: usize, P> {
     state: State<N>,
     cid: ConnectionId<P>,
-    config: ConnectionConfig,
+    config: UtpConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
@@ -146,7 +108,7 @@ pub struct Connection<const N: usize, P> {
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     pub fn new(
         cid: ConnectionId<P>,
-        config: ConnectionConfig,
+        config: UtpConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
@@ -1135,7 +1097,7 @@ mod test {
         Connection {
             state: State::Connecting(Some(connected)),
             cid,
-            config: ConnectionConfig::default(),
+            config: UtpConfig::default(),
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,

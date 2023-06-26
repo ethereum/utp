@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::config::UtpConfig;
 use crate::conn;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
@@ -25,7 +26,7 @@ where
 {
     pub(crate) fn new(
         cid: ConnectionId<P>,
-        config: conn::ConnectionConfig,
+        config: UtpConfig,
         syn: Option<Packet>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,

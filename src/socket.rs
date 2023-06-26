@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
-use crate::conn::ConnectionConfig;
+use crate::config::UtpConfig;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketType};
 use crate::stream::UtpStream;
@@ -17,12 +17,12 @@ type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
 struct Accept<P> {
     stream: oneshot::Sender<io::Result<UtpStream<P>>>,
-    config: ConnectionConfig,
 }
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
 pub struct UtpSocket<P> {
+    config: UtpConfig,
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
@@ -30,9 +30,9 @@ pub struct UtpSocket<P> {
 }
 
 impl UtpSocket<SocketAddr> {
-    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub async fn bind(addr: SocketAddr, config: UtpConfig) -> io::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
-        let socket = Self::with_socket(socket);
+        let socket = Self::with_socket(socket, config);
         Ok(socket)
     }
 }
@@ -41,7 +41,7 @@ impl<P> UtpSocket<P>
 where
     P: ConnectionPeer + 'static,
 {
-    pub fn with_socket<S>(socket: S) -> Self
+    pub fn with_socket<S>(socket: S, config: UtpConfig) -> Self
     where
         S: AsyncUdpSocket<P> + 'static,
     {
@@ -59,6 +59,7 @@ where
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
         let utp = Self {
+            config,
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
@@ -106,7 +107,7 @@ where
 
                                         let stream = UtpStream::new(
                                             cid,
-                                            accept.config,
+                                            config,
                                             Some(packet),
                                             socket_event_tx.clone(),
                                             events_rx,
@@ -166,7 +167,7 @@ where
 
                         let stream = UtpStream::new(
                             cid,
-                            accept.config,
+                            config,
                             Some(syn),
                             socket_event_tx.clone(),
                             events_rx,
@@ -209,12 +210,9 @@ where
         self.cid_gen.lock().unwrap().cid(peer, is_initiator)
     }
 
-    pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
+    pub async fn accept(&self) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
-        let accept = Accept {
-            stream: stream_tx,
-            config,
-        };
+        let accept = Accept { stream: stream_tx };
         self.accepts
             .send((accept, None))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
@@ -224,16 +222,9 @@ where
         }
     }
 
-    pub async fn accept_with_cid(
-        &self,
-        cid: ConnectionId<P>,
-        config: ConnectionConfig,
-    ) -> io::Result<UtpStream<P>> {
+    pub async fn accept_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
-        let accept = Accept {
-            stream: stream_tx,
-            config,
-        };
+        let accept = Accept { stream: stream_tx };
         self.accepts
             .send((accept, Some(cid)))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
@@ -243,7 +234,7 @@ where
         }
     }
 
-    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
+    pub async fn connect(&self, peer: P) -> io::Result<UtpStream<P>> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -254,7 +245,7 @@ where
 
         let stream = UtpStream::new(
             cid,
-            config,
+            self.config,
             None,
             self.socket_events.clone(),
             events_rx,
@@ -268,11 +259,7 @@ where
         }
     }
 
-    pub async fn connect_with_cid(
-        &self,
-        cid: ConnectionId<P>,
-        config: ConnectionConfig,
-    ) -> io::Result<UtpStream<P>> {
+    pub async fn connect_with_cid(&self, cid: ConnectionId<P>) -> io::Result<UtpStream<P>> {
         if self.conns.read().unwrap().contains_key(&cid) {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -289,7 +276,7 @@ where
 
         let stream = UtpStream::new(
             cid,
-            config,
+            self.config,
             None,
             self.socket_events.clone(),
             events_rx,
