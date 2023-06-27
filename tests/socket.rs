@@ -101,3 +101,93 @@ async fn socket() {
     one.unwrap();
     two.unwrap();
 }
+
+// Test that a new socket has zero connections
+#[tokio::test]
+async fn test_empty_socket_conn_count() {
+    let socket_addr = SocketAddr::from(([127, 0, 0, 1], 3402));
+    let socket = UtpSocket::bind(socket_addr).await.unwrap();
+    assert_eq!(socket.num_connections(), 0);
+}
+
+// Test that a socket returns 2 from num_connections after connecting twice
+#[tokio::test]
+async fn test_socket_reports_one_connection() {
+    let conn_config = ConnectionConfig::default();
+
+    let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3404));
+    let recv = UtpSocket::bind(recv_addr).await.unwrap();
+    let recv = Arc::new(recv);
+
+    let send_addr = SocketAddr::from(([127, 0, 0, 1], 3405));
+    let send = UtpSocket::bind(send_addr).await.unwrap();
+    let send = Arc::new(send);
+
+    let recv_one_cid = cid::ConnectionId {
+        send: 100,
+        recv: 101,
+        peer: send_addr,
+    };
+    let send_one_cid = cid::ConnectionId {
+        send: 101,
+        recv: 100,
+        peer: recv_addr,
+    };
+
+    let recv_one = Arc::clone(&recv);
+    let recv_one_handle = tokio::spawn(async move {
+        recv_one
+            .accept_with_cid(recv_one_cid, conn_config)
+            .await
+            .unwrap()
+    });
+
+    let send_one = Arc::clone(&send);
+    let send_one_handle = tokio::spawn(async move {
+        send_one
+            .connect_with_cid(send_one_cid, conn_config)
+            .await
+            .unwrap()
+    });
+
+    let recv_two_cid = cid::ConnectionId {
+        send: 200,
+        recv: 201,
+        peer: send_addr,
+    };
+    let send_two_cid = cid::ConnectionId {
+        send: 201,
+        recv: 200,
+        peer: recv_addr,
+    };
+
+    let recv_two = Arc::clone(&recv);
+    let recv_two_handle = tokio::spawn(async move {
+        recv_two
+            .accept_with_cid(recv_two_cid, conn_config)
+            .await
+            .unwrap()
+    });
+
+    let send_two = Arc::clone(&send);
+    let send_two_handle = tokio::spawn(async move {
+        send_two
+            .connect_with_cid(send_two_cid, conn_config)
+            .await
+            .unwrap()
+    });
+
+    let (tx_one, rx_one, tx_two, rx_two) = tokio::join!(
+        send_one_handle,
+        recv_one_handle,
+        send_two_handle,
+        recv_two_handle
+    );
+    tx_one.unwrap();
+    rx_one.unwrap();
+    tx_two.unwrap();
+    rx_two.unwrap();
+
+    assert_eq!(recv.num_connections(), 2);
+    assert_eq!(send.num_connections(), 2);
+}
