@@ -22,16 +22,8 @@ async fn socket() {
     let send = UtpSocket::bind(send_addr).await.unwrap();
     let send = Arc::new(send);
 
-    let recv_one_cid = cid::ConnectionId {
-        send: 100,
-        recv: 101,
-        peer: send_addr,
-    };
-    let send_one_cid = cid::ConnectionId {
-        send: 101,
-        recv: 100,
-        peer: recv_addr,
-    };
+    let recv_one_cid = cid::ConnectionId::new(101, send_addr, false);
+    let send_one_cid = cid::ConnectionId::new(101, recv_addr, true);
 
     let recv_arc = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
@@ -41,7 +33,7 @@ async fn socket() {
             .unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-        tracing::info!(cid.send = %recv_one_cid.send, cid.recv = %recv_one_cid.recv, "read {n} bytes from uTP stream");
+        tracing::info!(cid.send = %recv_one_cid.send(), cid.recv = %recv_one_cid.recv(), "read {n} bytes from uTP stream");
 
         assert_eq!(n, data_one_recv.len());
         assert_eq!(buf, data_one_recv);
@@ -62,16 +54,8 @@ async fn socket() {
     let data_two = vec![0xfe; 8192 * 2 * 2];
     let data_two_recv = data_two.clone();
 
-    let recv_two_cid = cid::ConnectionId {
-        send: 200,
-        recv: 201,
-        peer: send_addr,
-    };
-    let send_two_cid = cid::ConnectionId {
-        send: 201,
-        recv: 200,
-        peer: recv_addr,
-    };
+    let recv_two_cid = cid::ConnectionId::new(201, send_addr, false);
+    let send_two_cid = cid::ConnectionId::new(201, recv_addr, true);
 
     let recv_two_handle = tokio::spawn(async move {
         let mut stream = recv
@@ -80,7 +64,7 @@ async fn socket() {
             .unwrap();
         let mut buf = vec![];
         let n = stream.read_to_eof(&mut buf).await.unwrap();
-        tracing::info!(cid.send = %recv_two_cid.send, cid.recv = %recv_two_cid.recv, "read {n} bytes from uTP stream");
+        tracing::info!(cid.send = %recv_two_cid.send(), cid.recv = %recv_two_cid.recv(), "read {n} bytes from uTP stream");
 
         assert_eq!(n, data_two_recv.len());
         assert_eq!(buf, data_two_recv);

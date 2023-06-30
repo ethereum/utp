@@ -10,9 +10,35 @@ impl ConnectionPeer for SocketAddr {}
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct ConnectionId<P> {
-    pub send: u16,
-    pub recv: u16,
-    pub peer: P,
+    pub(crate) send: u16,
+    pub(crate) recv: u16,
+    pub(crate) peer: P,
+}
+
+impl<P> ConnectionId<P> {
+    pub fn new(id: u16, peer: P, is_sender: bool) -> Self {
+        if is_sender {
+            Self {
+                send: id,
+                recv: id.wrapping_sub(1),
+                peer,
+            }
+        } else {
+            Self {
+                send: id.wrapping_sub(1),
+                recv: id,
+                peer,
+            }
+        }
+    }
+
+    pub fn send(&self) -> u16 {
+        self.send
+    }
+
+    pub fn recv(&self) -> u16 {
+        self.recv
+    }
 }
 
 pub trait ConnectionIdGenerator<P> {
