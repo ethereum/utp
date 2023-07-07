@@ -693,7 +693,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
-        // Cap the diff. If the clock on the remote machine is behind the clock on the local
+        // Cap the diff. If the clock on the remote machine is ahead of the clock on the local
         // machine, then we could end up with large (inaccurate) diffs. Use the max idle timeout as
         // an upper bound on the possible diff. If the diff exceeds the bound, then assume the
         // remote clock is behind the local clock and use a diff of 1s.
