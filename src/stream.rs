@@ -93,7 +93,7 @@ where
 
         let (tx, rx) = oneshot::channel();
         self.writes
-            .send((buf.to_vec(), tx))
+            .send((buf.to_vec().into(), tx))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
 
         match rx.await {
