@@ -3,20 +3,44 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, oneshot};
-
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
+use crate::conn;
 use crate::conn::ConnectionConfig;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketType};
+use crate::stream;
 use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
+use thiserror::Error;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot};
 
 type ConnChannel = mpsc::UnboundedSender<StreamEvent>;
 
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("io error, {0}")]
+    Io(#[from] io::Error),
+    #[error("uTP stream error, {0}")]
+    Stream(#[from] stream::Error),
+    #[error("no uTP stream")]
+    NoStream,
+    #[error("idle timeout, uTP connection abort")]
+    ConnectionAbort,
+    #[error("opening uTP connection failed, {0}")]
+    ConnInit(#[from] conn::Error),
+    #[error("nonexistent connection id")]
+    NonExistentConnId,
+    #[error("notify channel failed, {0}")]
+    NotifyChannelRecv(#[from] oneshot::error::RecvError),
+    #[error("sending on accept connection channel failed")]
+    AcceptChannelSend,
+}
+
+pub struct SocketError(io::Error);
+
 struct Accept<P> {
-    stream: oneshot::Sender<io::Result<UtpStream<P>>>,
+    stream: oneshot::Sender<Result<UtpStream<P>, Error>>,
     config: ConnectionConfig,
 }
 
@@ -30,7 +54,7 @@ pub struct UtpSocket<P> {
 }
 
 impl UtpSocket<SocketAddr> {
-    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub async fn bind(addr: SocketAddr) -> Result<Self, Error> {
         let socket = UdpSocket::bind(addr).await?;
         let socket = Self::with_socket(socket);
         Ok(socket)
@@ -209,7 +233,7 @@ where
         self.cid_gen.lock().unwrap().cid(peer, is_initiator)
     }
 
-    pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
+    pub async fn accept(&self, config: ConnectionConfig) -> Result<UtpStream<P>, Error> {
         let (stream_tx, stream_rx) = oneshot::channel();
         let accept = Accept {
             stream: stream_tx,
@@ -217,18 +241,15 @@ where
         };
         self.accepts
             .send((accept, None))
-            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
-        match stream_rx.await {
-            Ok(stream) => Ok(stream?),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
-        }
+            .map_err(|_| Error::AcceptChannelSend)?;
+        stream_rx.await?
     }
 
     pub async fn accept_with_cid(
         &self,
         cid: ConnectionId<P>,
         config: ConnectionConfig,
-    ) -> io::Result<UtpStream<P>> {
+    ) -> Result<UtpStream<P>, Error> {
         let (stream_tx, stream_rx) = oneshot::channel();
         let accept = Accept {
             stream: stream_tx,
@@ -237,13 +258,10 @@ where
         self.accepts
             .send((accept, Some(cid)))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
-        match stream_rx.await {
-            Ok(stream) => Ok(stream?),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
-        }
+        stream_rx.await?
     }
 
-    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
+    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> Result<UtpStream<P>, Error> {
         let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -261,10 +279,9 @@ where
             connected_tx,
         );
 
-        match connected_rx.await {
-            Ok(Ok(..)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+        match connected_rx.await? {
+            Ok(..) => Ok(stream),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -272,15 +289,12 @@ where
         &self,
         cid: ConnectionId<P>,
         config: ConnectionConfig,
-    ) -> io::Result<UtpStream<P>> {
+    ) -> Result<UtpStream<P>, Error> {
         if self.conns.read().unwrap().contains_key(&cid) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "connection ID unavailable".to_string(),
-            ));
+            return Err(Error::NonExistentConnId);
         }
 
-        let (connected_tx, connected_rx) = oneshot::channel();
+        let (init_stream_tx, init_stream_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
         {
@@ -293,34 +307,25 @@ where
             None,
             self.socket_events.clone(),
             events_rx,
-            connected_tx,
+            init_stream_tx,
         );
 
-        match connected_rx.await {
-            Ok(Ok(..)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+        match init_stream_rx.await? {
+            Ok(..) => Ok(stream),
+            Err(err) => Err(err.into()),
         }
     }
 
     async fn await_connected(
         stream: UtpStream<P>,
         accept: Accept<P>,
-        connected: oneshot::Receiver<io::Result<()>>,
+        connected: oneshot::Receiver<Result<(), conn::Error>>,
     ) {
-        match connected.await {
-            Ok(Ok(..)) => {
-                let _ = accept.stream.send(Ok(stream));
-            }
-            Ok(Err(err)) => {
-                let _ = accept.stream.send(Err(err));
-            }
-            Err(..) => {
-                let _ = accept
-                    .stream
-                    .send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
-            }
-        }
+        _ = match connected.await {
+            Ok(Ok(..)) => accept.stream.send(Ok(stream)),
+            Ok(Err(err)) => accept.stream.send(Err(err.into())),
+            Err(..) => accept.stream.send(Err(Error::ConnectionAbort)),
+        };
     }
 }
 

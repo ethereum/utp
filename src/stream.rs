@@ -1,5 +1,4 @@
-use std::io;
-
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
 
@@ -11,6 +10,22 @@ use crate::packet::Packet;
 /// The size of the send and receive buffers.
 // TODO: Make the buffer size configurable.
 const BUF: usize = 1024 * 1024;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("uTP connection error, {0}")]
+    Conn(#[from] conn::Error),
+    #[error("no uTP connection")]
+    NoConn,
+    #[error("sending on notify channel failed")]
+    NotifyShutdown,
+    #[error("notify channel failed, {0}")]
+    NotifyChannelRecv(#[from] oneshot::error::RecvError),
+    #[error("sending on read channel failed")]
+    ReadChannelSend,
+    #[error("sending on write channel failed")]
+    WriteChannelSend,
+}
 
 pub struct UtpStream<P> {
     cid: ConnectionId<P>,
@@ -29,7 +44,7 @@ where
         syn: Option<Packet>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
-        connected: oneshot::Sender<io::Result<()>>,
+        connected: oneshot::Sender<Result<(), conn::Error>>,
     ) -> Self {
         let mut conn =
             conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
@@ -55,7 +70,7 @@ where
         &self.cid
     }
 
-    pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+    pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> Result<usize, Error> {
         // Reserve space in the buffer to avoid expensive allocation for small reads.
         buf.reserve(2048);
 
@@ -64,52 +79,40 @@ where
             let (tx, rx) = oneshot::channel();
             self.reads
                 .send((buf.capacity(), tx))
-                .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
+                .map_err(|_| Error::ReadChannelSend)?;
 
-            match rx.await {
-                Ok(result) => match result {
-                    Ok(mut data) => {
-                        if data.is_empty() {
-                            break Ok(n);
-                        }
-                        n += data.len();
-                        buf.append(&mut data);
-
-                        // Reserve additional space in the buffer proportional to the amount of
-                        // data read.
-                        buf.reserve(data.len());
-                    }
-                    Err(err) => return Err(err),
-                },
-                Err(err) => return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
+            let mut data = rx.await??;
+            if data.is_empty() {
+                break Ok(n);
             }
+            n += data.len();
+            buf.append(&mut data);
+
+            // Reserve additional space in the buffer proportional to the amount of
+            // data read.
+            buf.reserve(data.len());
         }
     }
 
-    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    pub async fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
         if self.shutdown.is_none() {
-            return Err(io::Error::from(io::ErrorKind::NotConnected));
+            return Err(Error::NoConn);
         }
 
         let (tx, rx) = oneshot::channel();
         self.writes
             .send((buf.to_vec(), tx))
-            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
+            .map_err(|_| Error::WriteChannelSend)?;
 
-        match rx.await {
-            Ok(n) => Ok(n?),
-            Err(err) => Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
-        }
+        Ok(rx.await??)
     }
 }
 
 impl<P> UtpStream<P> {
-    pub fn shutdown(&mut self) -> io::Result<()> {
+    pub fn shutdown(&mut self) -> Result<(), Error> {
         match self.shutdown.take() {
-            Some(shutdown) => Ok(shutdown
-                .send(())
-                .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?),
-            None => Err(io::Error::from(io::ErrorKind::NotConnected)),
+            Some(shutdown) => Ok(shutdown.send(()).map_err(|_| Error::NotifyShutdown)?),
+            None => Err(Error::NoConn),
         }
     }
 }
