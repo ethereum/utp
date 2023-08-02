@@ -209,6 +209,11 @@ where
         self.cid_gen.lock().unwrap().cid(peer, is_initiator)
     }
 
+    /// Returns the number of connections currently open, both inbound and outbound.
+    pub fn num_connections(&self) -> usize {
+        self.conns.read().unwrap().len()
+    }
+
     pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         let accept = Accept {
