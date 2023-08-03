@@ -293,7 +293,7 @@ where
         }
 
         let stream = UtpStream::new(
-            cid,
+            cid.clone(),
             config,
             None,
             self.socket_events.clone(),
@@ -303,8 +303,14 @@ where
 
         match connected_rx.await {
             Ok(Ok(..)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+            Ok(Err(err)) => {
+                tracing::error!(%err, "failed to open connection with {cid:?}");
+                Err(err)
+            }
+            Err(_) => {
+                tracing::error!("failed to open connection with {cid:?}");
+                Err(io::Error::from(io::ErrorKind::TimedOut))
+            }
         }
     }
 
