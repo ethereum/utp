@@ -328,13 +328,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                             State::Closing { local_fin, remote_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap() && remote_fin.is_some(),
                             _ => false,
                         };
-                        if finished {
+
+                        let err = if finished {
                             tracing::debug!(?self.state, ?unacked, "idle timeout expired, but only missing ACK for local FIN");
+                            None
                         } else {
                             tracing::warn!(?self.state, ?unacked, "closing, idle for too long...");
-                        }
+                            Some(Error::TimedOut)
+                        };
 
-                        self.state = State::Closed { err: Some(Error::TimedOut) };
+                        self.state = State::Closed { err };
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
