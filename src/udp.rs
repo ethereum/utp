@@ -10,18 +10,19 @@ use crate::cid::ConnectionPeer;
 #[async_trait]
 pub trait AsyncUdpSocket<P: ConnectionPeer>: Send + Sync {
     /// Attempts to send data on the socket to a given address.
-    async fn send_to(&self, buf: &[u8], target: &P) -> io::Result<usize>;
+    /// Note that this should return nearly immediately, rather than awaiting something internally.
+    async fn send_to(&mut self, buf: &[u8], target: &P) -> io::Result<usize>;
     /// Attempts to receive a single datagram on the socket.
-    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, P)>;
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, P)>;
 }
 
 #[async_trait]
 impl AsyncUdpSocket<SocketAddr> for UdpSocket {
-    async fn send_to(&self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
-        self.send_to(buf, *target).await
+    async fn send_to(&mut self, buf: &[u8], target: &SocketAddr) -> io::Result<usize> {
+        UdpSocket::send_to(self, buf, target).await
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        self.recv_from(buf).await
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        UdpSocket::recv_from(self, buf).await
     }
 }

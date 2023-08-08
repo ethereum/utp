@@ -41,7 +41,7 @@ impl<P> UtpSocket<P>
 where
     P: ConnectionPeer + 'static,
 {
-    pub fn with_socket<S>(socket: S) -> Self
+    pub fn with_socket<S>(mut socket: S) -> Self
     where
         S: AsyncUdpSocket<P> + 'static,
     {
@@ -65,7 +65,6 @@ where
             socket_events: socket_event_tx.clone(),
         };
 
-        let socket = Arc::new(socket);
         tokio::spawn(async move {
             let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
