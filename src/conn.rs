@@ -92,6 +92,25 @@ enum State<const N: usize> {
     },
 }
 
+impl<const N: usize> fmt::Debug for State<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connecting(_) => write!(f, "State::Connecting"),
+            Self::Established { .. } => write!(f, "State::Established"),
+            Self::Closing {
+                local_fin,
+                remote_fin,
+                ..
+            } => f
+                .debug_struct("State::Closing")
+                .field("local_fin", local_fin)
+                .field("remote_fin", remote_fin)
+                .finish(),
+            Self::Closed { err } => f.debug_struct("State::Closed").field("err", err).finish(),
+        }
+    }
+}
+
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
@@ -298,10 +317,27 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
-                        let unacked: Vec<u16> = self.unacked.keys().copied().collect();
-                        tracing::warn!(?unacked, "idle timeout expired, closing...");
+                        // Warn that we are quitting the connection, due to a lack of activity.
 
-                        self.state = State::Closed { err: Some(Error::TimedOut) };
+                        // If both endpoints have exchanged FINs, and our FIN is the only
+                        // unacknowledged packet, then do not emit a warning. It's not a big deal
+                        // that their STATE for our FIN got dropped: we handled their FIN anyway.
+
+                        let unacked: Vec<u16> = self.unacked.keys().copied().collect();
+                        let finished = match self.state {
+                            State::Closing { local_fin, remote_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap() && remote_fin.is_some(),
+                            _ => false,
+                        };
+
+                        let err = if finished {
+                            tracing::debug!(?self.state, ?unacked, "idle timeout expired, but only missing ACK for local FIN");
+                            None
+                        } else {
+                            tracing::warn!(?self.state, ?unacked, "closing, idle for too long...");
+                            Some(Error::TimedOut)
+                        };
+
+                        self.state = State::Closed { err };
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
@@ -1398,5 +1434,52 @@ mod test {
 
         conn.on_reset();
         assert!(std::matches!(conn.state, State::Closed { err: None }));
+    }
+
+    #[test]
+    fn state_debug_format() {
+        // Test that the state enum can be formatted with debug formatting.
+
+        // Test Connecting
+        let state: State<BUF> = State::Connecting(None);
+        let expected_format = "State::Connecting";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Established
+        let state: State<BUF> = State::Established {
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+        };
+        let expected_format = "State::Established";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closing
+        let state: State<BUF> = State::Closing {
+            local_fin: Some(12),
+            remote_fin: Some(34),
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+        };
+        let expected_format = "State::Closing { local_fin: Some(12), remote_fin: Some(34) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closed
+        let state: State<BUF> = State::Closed {
+            err: Some(Error::Reset),
+        };
+        let expected_format = "State::Closed { err: Some(Reset) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
     }
 }
