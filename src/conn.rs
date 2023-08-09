@@ -743,6 +743,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn on_packet(&mut self, packet: &Packet, now: Instant) {
+        tracing::trace!("Received {:?}", packet);
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
@@ -1159,6 +1160,14 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 packet.payload().len() as u32,
             )
         };
+        tracing::trace!(
+            "Write data cid={} packetType={} pkSeqNr={} pkAckNr={} length={}",
+            packet.conn_id(),
+            packet.packet_type(),
+            packet.seq_num(),
+            packet.ack_num(),
+            packet.encoded_len()
+        );
 
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
