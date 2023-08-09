@@ -9,5 +9,6 @@ pub mod sent;
 pub mod seq;
 pub mod socket;
 pub mod stream;
+pub mod testutils;
 pub mod time;
 pub mod udp;

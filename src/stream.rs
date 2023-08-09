@@ -1,6 +1,7 @@
 use std::io;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task;
 use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
@@ -17,6 +18,7 @@ pub struct UtpStream<P> {
     reads: mpsc::UnboundedSender<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
     shutdown: Option<oneshot::Sender<()>>,
+    conn_handle: Option<task::JoinHandle<io::Result<()>>>,
 }
 
 impl<P> UtpStream<P>
@@ -37,7 +39,7 @@ where
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        let conn_handle = tokio::spawn(async move {
             conn.event_loop(stream_events, writes_rx, reads_rx, shutdown_rx)
                 .instrument(tracing::info_span!("uTP", send = cid.send, recv = cid.recv))
                 .await
@@ -48,6 +50,7 @@ where
             reads: reads_tx,
             writes: writes_tx,
             shutdown: Some(shutdown_tx),
+            conn_handle: Some(conn_handle),
         }
     }
 
@@ -101,10 +104,22 @@ where
             Err(err) => Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
         }
     }
+
+    /// Closes the stream gracefully.
+    /// Completes when the remote peer acknowledges all sent data.
+    pub async fn close(&mut self) -> io::Result<()> {
+        self.shutdown()?;
+        match self.conn_handle.take() {
+            Some(conn_handle) => conn_handle.await?,
+            None => Err(io::Error::from(io::ErrorKind::NotConnected)),
+        }
+    }
 }
 
 impl<P> UtpStream<P> {
-    pub fn shutdown(&mut self) -> io::Result<()> {
+    // Send signal to the connection event loop to exit, after all outgoing writes have completed.
+    // Public callers should use close() instead.
+    fn shutdown(&mut self) -> io::Result<()> {
         match self.shutdown.take() {
             Some(shutdown) => Ok(shutdown
                 .send(())

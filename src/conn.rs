@@ -60,6 +60,13 @@ impl From<Error> for io::ErrorKind {
     }
 }
 
+impl From<Error> for io::Error {
+    fn from(err: Error) -> Self {
+        let err_kind = io::ErrorKind::from(err);
+        err_kind.into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
     Initiator((u16, usize)),
@@ -194,7 +201,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut writes: mpsc::UnboundedReceiver<Write>,
         mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
-    ) {
+    ) -> io::Result<()> {
         tracing::debug!("uTP conn starting...");
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
@@ -320,7 +327,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     tracing::warn!("unable to send shutdown signal to uTP socket");
                 }
 
-                break;
+                if let Some(err) = err {
+                    return Err(err.into());
+                } else {
+                    return Ok(());
+                }
             }
         }
     }
