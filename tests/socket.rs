@@ -112,7 +112,7 @@ async fn test_empty_socket_conn_count() {
 
 // Test that a socket returns 2 from num_connections after connecting twice
 #[tokio::test]
-async fn test_socket_reports_one_connection() {
+async fn test_socket_reports_two_connections() {
     let conn_config = ConnectionConfig::default();
 
     let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3404));

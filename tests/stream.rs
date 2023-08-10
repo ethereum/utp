@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use utp_rs::conn::ConnectionConfig;
+use utp_rs::conn::{ConnectionConfig, DEFAULT_MAX_IDLE_TIMEOUT};
 use utp_rs::socket::UtpSocket;
 
 use utp_rs::testutils;
 
 // How long should tests expect the connection to wait before timing out due to inactivity?
-const EXPECTED_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const EXPECTED_IDLE_TIMEOUT: Duration = DEFAULT_MAX_IDLE_TIMEOUT;
 
 // Test that close() returns successful, after transfer is complete
 #[tokio::test]
