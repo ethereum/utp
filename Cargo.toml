@@ -2,10 +2,10 @@
 name = "utp-rs"
 version = "0.1.0-alpha.5"
 edition = "2021"
-authors = ["Jacob Kaufmann"]
+authors = ["Jacob Kaufmann", "Jason Carver"]
 description = "uTorrent transport protocol"
 readme = "README.md"
-repository = "https://github.com/jacobkaufmann/utp/"
+repository = "https://github.com/ethereum/utp/"
 license = "MIT"
 keywords = ["utp"]
 categories = ["network programming"]
