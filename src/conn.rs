@@ -60,6 +60,13 @@ impl From<Error> for io::ErrorKind {
     }
 }
 
+impl From<Error> for io::Error {
+    fn from(err: Error) -> Self {
+        let err_kind = io::ErrorKind::from(err);
+        err_kind.into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
     Initiator((u16, usize)),
@@ -85,12 +92,34 @@ enum State<const N: usize> {
     },
 }
 
+impl<const N: usize> fmt::Debug for State<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connecting(_) => write!(f, "State::Connecting"),
+            Self::Established { .. } => write!(f, "State::Established"),
+            Self::Closing {
+                local_fin,
+                remote_fin,
+                ..
+            } => f
+                .debug_struct("State::Closing")
+                .field("local_fin", local_fin)
+                .field("remote_fin", remote_fin)
+                .finish(),
+            Self::Closed { err } => f.debug_struct("State::Closed").field("err", err).finish(),
+        }
+    }
+}
+
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
 pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
     pub max_packet_size: u16,
+    /// The maximum number of connection attempts to make before giving up.
+    /// Note: if the max_idle_timeout is set too low, then the connection may time out before all
+    /// these attempts can be executed.
     pub max_conn_attempts: usize,
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
@@ -99,16 +128,17 @@ pub struct ConnectionConfig {
     pub target_delay: Duration,
 }
 
+pub const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl Default for ConnectionConfig {
     fn default() -> Self {
-        let max_idle_timeout = Duration::from_secs(10);
         Self {
-            max_conn_attempts: 3,
-            max_idle_timeout,
+            max_conn_attempts: 5,
+            max_idle_timeout: DEFAULT_MAX_IDLE_TIMEOUT,
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
-            max_timeout: max_idle_timeout,
+            max_timeout: DEFAULT_MAX_IDLE_TIMEOUT / 4,
             target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
         }
     }
@@ -191,7 +221,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut writes: mpsc::UnboundedReceiver<Write>,
         mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
-    ) {
+    ) -> io::Result<()> {
         tracing::debug!("uTP conn starting...");
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
@@ -249,6 +279,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         tokio::pin!(idle_timeout);
         loop {
             tokio::select! {
+                biased;
                 Some(event) = stream_events.recv() => {
                     match event {
                         StreamEvent::Incoming(packet) => {
@@ -262,12 +293,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                             shutting_down = true;
                         }
                     }
-                }
-                Some(Ok(timeout)) = self.unacked.next() => {
-                    let (seq, packet) = timeout;
-                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
-
-                    self.on_timeout(packet, Instant::now());
                 }
                 Some(write) = writes.recv(), if !shutting_down => {
                     // Reset the idle timeout on any new write.
@@ -285,12 +310,35 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 _ = self.writable.notified() => {
                     self.process_writes(Instant::now());
                 }
+                Some(Ok(timeout)) = self.unacked.next() => {
+                    let (seq, packet) = timeout;
+                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
+
+                    self.on_timeout(packet, Instant::now());
+                }
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
-                        let unacked: Vec<u16> = self.unacked.keys().copied().collect();
-                        tracing::warn!(?unacked, "idle timeout expired, closing...");
+                        // Warn that we are quitting the connection, due to a lack of activity.
 
-                        self.state = State::Closed { err: Some(Error::TimedOut) };
+                        // If both endpoints have exchanged FINs, and our FIN is the only
+                        // unacknowledged packet, then do not emit a warning. It's not a big deal
+                        // that their STATE for our FIN got dropped: we handled their FIN anyway.
+
+                        let unacked: Vec<u16> = self.unacked.keys().copied().collect();
+                        let finished = match self.state {
+                            State::Closing { local_fin, remote_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap() && remote_fin.is_some(),
+                            _ => false,
+                        };
+
+                        let err = if finished {
+                            tracing::debug!(?self.state, ?unacked, "idle timeout expired, but only missing ACK for local FIN");
+                            None
+                        } else {
+                            tracing::warn!(?self.state, ?unacked, "closing, idle for too long...");
+                            Some(Error::TimedOut)
+                        };
+
+                        self.state = State::Closed { err };
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
@@ -316,7 +364,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     tracing::warn!("unable to send shutdown signal to uTP socket");
                 }
 
-                break;
+                if let Some(err) = err {
+                    return Err(err.into());
+                } else {
+                    return Ok(());
+                }
             }
         }
     }
@@ -621,13 +673,16 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     } else {
                         let seq = *syn;
                         *attempts += 1;
+
+                        // Double previous timeout for exponential backoff on each attempt
+                        let timeout = self.config.initial_timeout * 2u32.pow(*attempts as u32);
+                        self.unacked.insert_at(seq, packet, timeout);
+
+                        // Re-send SYN packet.
                         let packet = self.syn_packet(seq);
-                        let _ = self.socket_events.send(SocketEvent::Outgoing((
-                            packet.clone(),
-                            self.cid.peer.clone(),
-                        )));
-                        self.unacked
-                            .insert_at(seq, packet, self.config.initial_timeout);
+                        let _ = self
+                            .socket_events
+                            .send(SocketEvent::Outgoing((packet, self.cid.peer.clone())));
                     }
                 }
                 Endpoint::Acceptor(..) => {}
@@ -689,6 +744,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn on_packet(&mut self, packet: &Packet, now: Instant) {
+        tracing::trace!("Received {:?}", packet);
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
@@ -734,9 +790,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
-                    self.socket_events
-                        .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
-                        .expect("outgoing channel should be open if connection is not closed");
+                    let event = SocketEvent::Outgoing((state, self.cid.peer.clone()));
+                    if self.socket_events.send(event).is_err() {
+                        tracing::warn!("Cannot transmit state packet: socket closed channel");
+                        return;
+                    }
                 }
             }
             PacketType::State | PacketType::Reset => {}
@@ -1098,12 +1156,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 packet.payload().len() as u32,
             )
         };
+        tracing::trace!(
+            "Write data cid={} packetType={} pkSeqNr={} pkAckNr={} length={}",
+            packet.conn_id(),
+            packet.packet_type(),
+            packet.seq_num(),
+            packet.ack_num(),
+            packet.encoded_len()
+        );
 
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
-        socket_events
-            .send(SocketEvent::Outgoing((packet, dest.clone())))
-            .expect("outgoing channel should be open if connection is not closed");
+        let outbound = SocketEvent::Outgoing((packet, dest.clone()));
+        if socket_events.send(outbound).is_err() {
+            tracing::warn!("Cannot transmit packet: socket closed channel");
+        }
     }
 }
 
@@ -1372,5 +1439,52 @@ mod test {
 
         conn.on_reset();
         assert!(std::matches!(conn.state, State::Closed { err: None }));
+    }
+
+    #[test]
+    fn state_debug_format() {
+        // Test that the state enum can be formatted with debug formatting.
+
+        // Test Connecting
+        let state: State<BUF> = State::Connecting(None);
+        let expected_format = "State::Connecting";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Established
+        let state: State<BUF> = State::Established {
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+        };
+        let expected_format = "State::Established";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closing
+        let state: State<BUF> = State::Closing {
+            local_fin: Some(12),
+            remote_fin: Some(34),
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+        };
+        let expected_format = "State::Closing { local_fin: Some(12), remote_fin: Some(34) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closed
+        let state: State<BUF> = State::Closed {
+            err: Some(Error::Reset),
+        };
+        let expected_format = "State::Closed { err: Some(Reset) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
     }
 }

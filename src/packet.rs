@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 
 /// Size of an encoded uTP header in bytes.
 const PACKET_HEADER_LEN: usize = 20;
@@ -129,6 +130,20 @@ pub enum PacketType {
     State,
     Reset,
     Syn,
+}
+
+impl fmt::Display for PacketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Data => "ST_DATA".to_string(),
+            Self::Fin => "ST_FIN".to_string(),
+            Self::State => "ST_STATE".to_string(),
+            Self::Reset => "ST_RESET".to_string(),
+            Self::Syn => "ST_SYN".to_string(),
+        };
+
+        write!(f, "{s}")
+    }
 }
 
 impl TryFrom<u8> for PacketType {
@@ -404,7 +419,7 @@ impl SelectiveAck {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Packet {
     header: PacketHeader,
     selective_ack: Option<SelectiveAck>,
@@ -551,6 +566,20 @@ impl Packet {
         }
 
         Ok((extensions, index))
+    }
+}
+
+impl Debug for Packet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "packet cid={} packetType={} seqNr={} ackNr={} timestamp={} timestampDiff={} remoteWindow={}",
+               self.conn_id(),
+               self.packet_type(),
+               self.seq_num(),
+               self.ack_num(),
+               self.ts_micros(),
+               self.ts_diff_micros(),
+               self.window_size(),
+        )
     }
 }
 
