@@ -773,11 +773,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
             PacketType::Data => self.on_data(packet.seq_num(), packet.payload()),
             PacketType::Fin => {
-                if packet.payload().is_empty() {
-                    self.on_fin(packet.seq_num(), None);
-                } else {
-                    self.on_fin(packet.seq_num(), Some(packet.payload()));
-                }
+                self.on_fin(packet.seq_num(), packet.payload());
             }
             PacketType::Reset => {
                 self.on_reset();
@@ -974,7 +970,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
     }
 
-    fn on_fin(&mut self, seq_num: u16, data: Option<&[u8]>) {
+    fn on_fin(&mut self, seq_num: u16, data: &[u8]) {
         match &mut self.state {
             State::Connecting(..) => {}
             State::Established {
@@ -983,11 +979,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 send_buf,
             } => {
                 // Register the FIN with the receive buffer.
-                if let Some(data) = data {
-                    recv_buf.write(data, seq_num);
-                } else {
-                    recv_buf.write(&[], seq_num);
-                }
+                recv_buf.write(data, seq_num);
 
                 tracing::debug!(seq = %seq_num, "received FIN");
 
@@ -1016,11 +1008,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         tracing::debug!(seq = %seq_num, "received FIN");
 
                         *remote_fin = Some(seq_num);
-                        if let Some(data) = data {
-                            recv_buf.write(data, seq_num);
-                        } else {
-                            recv_buf.write(&[], seq_num);
-                        }
+                        recv_buf.write(data, seq_num);
                     }
                 }
             }
@@ -1338,7 +1326,7 @@ mod test {
         };
 
         let fin = syn.wrapping_add(3);
-        conn.on_fin(fin, None);
+        conn.on_fin(fin, &[]);
         match conn.state {
             State::Closing {
                 local_fin,
@@ -1374,7 +1362,7 @@ mod test {
         };
 
         let remote_fin = syn.wrapping_add(3);
-        conn.on_fin(remote_fin, None);
+        conn.on_fin(remote_fin, &[]);
         match conn.state {
             State::Closing {
                 local_fin: local,
@@ -1410,7 +1398,7 @@ mod test {
         };
 
         let alt_fin = fin.wrapping_add(1);
-        conn.on_fin(alt_fin, None);
+        conn.on_fin(alt_fin, &[]);
         assert!(std::matches!(
             conn.state,
             State::Closed {
