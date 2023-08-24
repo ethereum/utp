@@ -357,9 +357,10 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 self.process_reads();
                 self.process_writes(Instant::now());
 
-                if let Err(..) = self
+                if self
                     .socket_events
                     .send(SocketEvent::Shutdown(self.cid.clone()))
+                    .is_err()
                 {
                     tracing::warn!("unable to send shutdown signal to uTP socket");
                 }
