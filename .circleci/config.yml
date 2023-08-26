@@ -7,5 +7,5 @@ workflows:
       - rust/lint-test-build:
           clippy_arguments: '--all-targets --all-features -- --deny warnings'
           release: true
-          version: 1.65.0
+          version: 1.71.1
 
