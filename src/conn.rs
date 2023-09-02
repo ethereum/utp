@@ -664,6 +664,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             State::Connecting(connected) => match &mut self.endpoint {
                 Endpoint::Initiator((syn, attempts)) => {
                     if *attempts >= self.config.max_conn_attempts {
+                        tracing::error!("quitting connection attempt, after {} tries", *attempts);
                         let err = Error::TimedOut;
                         if let Some(connected) = connected.take() {
                             let err = io::Error::from(io::ErrorKind::from(err));
@@ -672,6 +673,13 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         self.state = State::Closed { err: Some(err) };
                     } else {
                         let seq = *syn;
+                        let log_msg = format!("retrying connection, after {} attempts", *attempts);
+                        match *attempts {
+                            1 => tracing::trace!(log_msg),
+                            2 => tracing::debug!(log_msg),
+                            3 => tracing::info!(log_msg),
+                            _ => tracing::warn!(log_msg),
+                        }
                         *attempts += 1;
 
                         // Double previous timeout for exponential backoff on each attempt
