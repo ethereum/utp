@@ -14,8 +14,7 @@ use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
-use crate::sent::SentPackets;
-use crate::seq::CircularRangeInclusive;
+use crate::sent::{SentPackets, SentPacketsError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
@@ -762,22 +761,22 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
-            PacketType::State => {
-                let delay = Duration::from_micros(packet.ts_diff_micros().into());
-                self.on_state(
-                    packet.seq_num(),
-                    packet.ack_num(),
-                    packet.selective_ack(),
-                    delay,
-                    now,
-                );
-            }
+            PacketType::State => self.on_state(packet.seq_num(), packet.ack_num()),
             PacketType::Data => self.on_data(packet.seq_num(), packet.payload()),
-            PacketType::Fin => {
-                self.on_fin(packet.seq_num(), packet.payload());
-            }
-            PacketType::Reset => {
-                self.on_reset();
+            PacketType::Fin => self.on_fin(packet.seq_num(), packet.payload()),
+            PacketType::Reset => self.on_reset(),
+        }
+
+        // Mark sent packets as acked, using the received ack_num
+        match packet.packet_type() {
+            PacketType::Syn | PacketType::Reset => {}
+            PacketType::State | PacketType::Data | PacketType::Fin => {
+                let delay = Duration::from_micros(packet.ts_diff_micros().into());
+                if let Err(err) =
+                    self.process_ack(packet.ack_num(), packet.selective_ack(), delay, now)
+                {
+                    tracing::warn!(%err, ?packet, "ack does not correspond to known seq_num");
+                }
             }
         }
 
@@ -830,6 +829,36 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
     }
 
+    fn process_ack(
+        &mut self,
+        ack_num: u16,
+        selective_ack: Option<&SelectiveAck>,
+        delay: Duration,
+        now: Instant,
+    ) -> Result<(), Error> {
+        match &mut self.state {
+            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
+                match sent_packets.on_ack(ack_num, selective_ack, delay, now) {
+                    Ok((full_acked, selected_acks)) => {
+                        self.unacked.retain(|seq, _| !full_acked.contains(*seq));
+                        for seq_num in selected_acks {
+                            self.unacked.remove(&seq_num);
+                        }
+                        Ok(())
+                    }
+                    Err(err) => match err {
+                        SentPacketsError::InvalidAckNum => {
+                            let err = Error::InvalidAckNum;
+                            self.reset(err);
+                            Err(err)
+                        }
+                    },
+                }
+            }
+            State::Connecting(..) | State::Closed { .. } => Ok(()),
+        }
+    }
+
     fn on_syn(&mut self, seq_num: u16) {
         let err = match self.endpoint {
             // If we are the accepting endpoint, then check whether the SYN is a retransmission. A
@@ -852,14 +881,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
     }
 
-    fn on_state(
-        &mut self,
-        seq_num: u16,
-        ack_num: u16,
-        selective_ack: Option<&SelectiveAck>,
-        delay: Duration,
-        now: Instant,
-    ) {
+    fn on_state(&mut self, seq_num: u16, ack_num: u16) {
         match &mut self.state {
             State::Connecting(connected) => match self.endpoint {
                 // If the STATE acknowledges our SYN, then mark the connection established.
@@ -885,33 +907,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 Endpoint::Acceptor(..) => {}
             },
-            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
-                let range = sent_packets.seq_num_range();
-                if range.contains(ack_num) {
-                    // Do not ACK if ACK num corresponds to initial packet.
-                    if ack_num != range.start() {
-                        sent_packets.on_ack(ack_num, selective_ack, delay, now);
-                    }
-
-                    // Mark all packets up to `ack_num` acknowledged by retaining all packets in
-                    // the range beyond `ack_num`.
-                    let acked = CircularRangeInclusive::new(range.start(), ack_num);
-                    self.unacked.retain(|seq, _| !acked.contains(*seq));
-
-                    // TODO: Helper for selective ACK.
-                    if let Some(selective_ack) = selective_ack {
-                        for (i, acked) in selective_ack.acked().iter().enumerate() {
-                            let seq_num = usize::from(ack_num).wrapping_add(2 + i) as u16;
-                            if *acked {
-                                self.unacked.remove(&seq_num);
-                            }
-                        }
-                    }
-                } else {
-                    self.reset(Error::InvalidAckNum);
-                }
-            }
-            State::Closed { .. } => {}
+            State::Established { .. } | State::Closing { .. } | State::Closed { .. } => {}
         }
     }
 
@@ -1255,14 +1251,14 @@ mod test {
         let mut conn = conn(endpoint);
 
         let seq_num = 1;
-        let now = Instant::now();
-        conn.on_state(seq_num, syn, None, DELAY, now);
+        conn.on_state(seq_num, syn);
 
         assert!(std::matches!(conn.state, State::Established { .. }));
     }
 
     #[test]
-    fn on_state_established_invalid_ack_num() {
+    /// If a received ack_num is not a known sequence number, then reset the connection.
+    fn on_packet_invalid_ack_num() {
         let syn = 100;
         let syn_ack = 101;
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
@@ -1291,14 +1287,9 @@ mod test {
             recv_buf,
         };
 
-        let now = Instant::now();
-        conn.on_state(
-            syn.wrapping_add(1),
-            syn_ack.wrapping_add(2),
-            None,
-            DELAY,
-            now,
-        );
+        // Dummy delay, value is irrelevant
+        let delay = Duration::from_millis(100);
+        let ack_result = conn.process_ack(syn_ack.wrapping_add(2), None, delay, now);
 
         assert!(std::matches!(
             conn.state,
@@ -1306,6 +1297,10 @@ mod test {
                 err: Some(Error::InvalidAckNum),
             }
         ));
+        assert! {
+            ack_result.is_err(),
+            "Expected received_ack to return an error"
+        };
     }
 
     #[test]
