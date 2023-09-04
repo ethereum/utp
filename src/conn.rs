@@ -127,12 +127,12 @@ pub struct ConnectionConfig {
     pub target_delay: Duration,
 }
 
-pub const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            max_conn_attempts: 5,
+            max_conn_attempts: 6,
             max_idle_timeout: DEFAULT_MAX_IDLE_TIMEOUT,
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
@@ -675,7 +675,10 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         *attempts += 1;
 
                         // Double previous timeout for exponential backoff on each attempt
-                        let timeout = self.config.initial_timeout * 2u32.pow(*attempts as u32);
+                        let timeout = self
+                            .config
+                            .initial_timeout
+                            .mul_f32((1.5_f32).powf(*attempts as f32));
                         self.unacked.insert_at(seq, packet, timeout);
 
                         // Re-send SYN packet.
