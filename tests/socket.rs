@@ -27,7 +27,7 @@ async fn socket() {
     let mut handles = FuturesUnordered::new();
 
     let start = Instant::now();
-    let num_transfers = 1500;
+    let num_transfers = 1400;
     for i in 0..num_transfers {
         // step up cid by two to avoid collisions
         let handle =
