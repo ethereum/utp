@@ -79,9 +79,9 @@ where
                             }
                         };
 
-                        let peer_init_cid = cid_from_packet(&packet, &src, IdType::OurSendIdPeerInitiated);
-                        let we_init_cid = cid_from_packet(&packet, &src, IdType::OurSendIdWeInitiated);
-                        let acc_cid = cid_from_packet(&packet, &src, IdType::OurRecvId);
+                        let peer_init_cid = cid_from_packet(&packet, &src, IdType::SendIdPeerInitiated);
+                        let we_init_cid = cid_from_packet(&packet, &src, IdType::SendIdWeInitiated);
+                        let acc_cid = cid_from_packet(&packet, &src, IdType::RecvId);
                         let mut conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
@@ -93,7 +93,7 @@ where
                             }
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
-                                    let cid = cid_from_packet(&packet, &src, IdType::OurRecvId);
+                                    let cid = cid_from_packet(&packet, &src, IdType::RecvId);
                                     let mut awaiting = awaiting.write().unwrap();
 
                                     // If there was an awaiting connection with the CID, then
@@ -341,9 +341,9 @@ where
 
 #[derive(Copy, Clone, Debug)]
 enum IdType {
-    OurRecvId,
-    OurSendIdWeInitiated,
-    OurSendIdPeerInitiated,
+    RecvId,
+    SendIdWeInitiated,
+    SendIdPeerInitiated,
 }
 
 fn cid_from_packet<P: ConnectionPeer>(
@@ -352,7 +352,7 @@ fn cid_from_packet<P: ConnectionPeer>(
     id_type: IdType,
 ) -> ConnectionId<P> {
     match id_type {
-        IdType::OurRecvId => {
+        IdType::RecvId => {
             let (send, recv) = match packet.packet_type() {
                 PacketType::Syn => (packet.conn_id(), packet.conn_id().wrapping_add(1)),
                 PacketType::State | PacketType::Data | PacketType::Fin | PacketType::Reset => {
@@ -365,7 +365,7 @@ fn cid_from_packet<P: ConnectionPeer>(
                 peer: src.clone(),
             }
         }
-        IdType::OurSendIdWeInitiated => {
+        IdType::SendIdWeInitiated => {
             let (send, recv) = (packet.conn_id().wrapping_add(1), packet.conn_id());
             ConnectionId {
                 send,
@@ -373,7 +373,7 @@ fn cid_from_packet<P: ConnectionPeer>(
                 peer: src.clone(),
             }
         }
-        IdType::OurSendIdPeerInitiated => {
+        IdType::SendIdPeerInitiated => {
             let (send, recv) = (packet.conn_id(), packet.conn_id().wrapping_sub(1));
             ConnectionId {
                 send,
