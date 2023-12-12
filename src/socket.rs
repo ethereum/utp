@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::net::UdpSocket;
@@ -27,6 +28,8 @@ pub struct UtpSocket<P> {
     cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: mpsc::UnboundedSender<(Accept<P>, Option<ConnectionId<P>>)>,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+    inn: Arc<AtomicU32>,
+    out: Arc<AtomicU32>,
 }
 
 impl UtpSocket<SocketAddr> {
@@ -58,11 +61,16 @@ where
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
 
+        let inn = Arc::new(AtomicU32::new(0));
+        let out = Arc::new(AtomicU32::new(0));
+
         let utp = Self {
             conns: Arc::clone(&conns),
             cid_gen,
             accepts: accepts_tx,
             socket_events: socket_event_tx.clone(),
+            inn: inn.clone(),
+            out: out.clone(),
         };
 
         tokio::spawn(async move {
@@ -71,6 +79,7 @@ where
                 tokio::select! {
                     biased;
                     Ok((n, src)) = socket.recv_from(&mut buf) => {
+
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
@@ -78,6 +87,10 @@ where
                                 continue;
                             }
                         };
+
+                        {
+                            inn.fetch_add(1, Ordering::SeqCst);
+                        }
 
                         let peer_init_cid = cid_from_packet(&packet, &src, IdType::SendIdPeerInitiated);
                         let we_init_cid = cid_from_packet(&packet, &src, IdType::SendIdWeInitiated);
@@ -184,6 +197,9 @@ where
                     Some(event) = socket_event_rx.recv() => {
                         match event {
                             SocketEvent::Outgoing((packet, dst)) => {
+                                {
+                                    out.fetch_add(1, Ordering::SeqCst);
+                                }
                                 let encoded = packet.encode();
                                 if let Err(err) = socket.send_to(&encoded, &dst).await {
                                     tracing::debug!(
@@ -389,5 +405,10 @@ impl<P> Drop for UtpSocket<P> {
         for conn in self.conns.read().unwrap().values() {
             let _ = conn.send(StreamEvent::Shutdown);
         }
+        tracing::warn!(
+            "is there packet loss in={} out={}",
+            self.inn.load(Ordering::SeqCst),
+            self.out.load(Ordering::SeqCst)
+        )
     }
 }
