@@ -364,7 +364,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 recv_buf,
             } => {
                 let mut local_fin = None;
-                if self.pending_writes.is_empty() && send_buf.is_empty() {
+                if self.pending_writes.is_empty() && send_buf.is_empty() && self.unacked.is_empty()
+                {
                     // TODO: Helper for construction of FIN.
                     let recv_window = recv_buf.available() as u32;
                     let seq_num = sent_packets.next_seq_num();
@@ -412,7 +413,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 // If we have not sent our FIN, and there are no pending writes, and there is no
                 // pending data in the send buffer, then send our FIN. If there were still data to
                 // send, then we would not know which sequence number to assign to our FIN.
-                if local_fin.is_none() && self.pending_writes.is_empty() && send_buf.is_empty() {
+                if local_fin.is_none()
+                    && self.pending_writes.is_empty()
+                    && send_buf.is_empty()
+                    && self.unacked.is_empty()
+                {
                     // TODO: Helper for construction of FIN.
                     let recv_window = recv_buf.available() as u32;
                     let seq_num = sent_packets.next_seq_num();
