@@ -826,21 +826,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 self.state = State::Closed { err: None };
             }
         }
-
-        // If both endpoints have exchanged FINs and all data has been received/acknowledged, then
-        // close the connection.
-        if let State::Closing {
-            local_fin: Some(..),
-            remote_fin: Some(remote),
-            sent_packets,
-            recv_buf,
-            ..
-        } = &mut self.state
-        {
-            if !sent_packets.has_unacked_packets() && recv_buf.ack_num() == *remote {
-                self.state = State::Closed { err: None };
-            }
-        }
     }
 
     fn process_ack(
