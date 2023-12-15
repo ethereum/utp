@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::udp::AsyncUdpSocket;
@@ -12,7 +12,7 @@ use crate::udp::AsyncUdpSocket;
 #[derive(Debug)]
 pub struct MockUdpSocket {
     outbound: mpsc::UnboundedSender<Vec<u8>>,
-    inbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    inbound: Arc<RwLock<mpsc::UnboundedReceiver<Vec<u8>>>>,
     /// Peers identified by a letter
     pub only_peer: char,
     /// Defines whether the link is up. If not up, link will SILENTLY drop all sent packets.
@@ -38,7 +38,7 @@ impl AsyncUdpSocket<char> for MockUdpSocket {
     ///
     /// Panics if `target` is not equal to `self.only_peer`. This socket is built to support
     /// exactly two peers communicating with each other, so it will panic if used with more.
-    async fn send_to(&mut self, buf: &[u8], target: &char) -> io::Result<usize> {
+    async fn send_to(&self, buf: &[u8], target: &char) -> io::Result<usize> {
         if target != &self.only_peer {
             panic!("MockUdpSocket only supports sending to one peer");
         }
@@ -58,9 +58,11 @@ impl AsyncUdpSocket<char> for MockUdpSocket {
     /// # Panics
     ///
     /// Panics if `buf` is smaller than the packet size.
-    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, char)> {
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, char)> {
         let packet = self
             .inbound
+            .write()
+            .await
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
@@ -81,13 +83,13 @@ fn build_link_pair() -> (MockUdpSocket, MockUdpSocket) {
     let (b_tx, b_rx) = mpsc::unbounded_channel();
     let a = MockUdpSocket {
         outbound: a_tx,
-        inbound: b_rx,
+        inbound: Arc::new(RwLock::new(b_rx)),
         only_peer: peer_b,
         up_status: Arc::new(AtomicBool::new(true)),
     };
     let b = MockUdpSocket {
         outbound: b_tx,
-        inbound: a_rx,
+        inbound: Arc::new(RwLock::new(a_rx)),
         only_peer: peer_a,
         up_status: Arc::new(AtomicBool::new(true)),
     };
