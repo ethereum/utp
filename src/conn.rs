@@ -111,7 +111,7 @@ impl<const N: usize> fmt::Debug for State<N> {
 }
 
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
-pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
+pub type Read = io::Result<Vec<u8>>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
@@ -165,7 +165,7 @@ pub struct Connection<const N: usize, P> {
     peer_recv_window: u32,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
     unacked: HashMapDelay<u16, Packet>,
-    pending_reads: VecDeque<Read>,
+    reads: mpsc::UnboundedSender<Read>,
     readable: Notify,
     pending_writes: VecDeque<Write>,
     writable: Notify,
@@ -179,6 +179,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+        reads: mpsc::UnboundedSender<Read>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
@@ -206,7 +207,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             peer_recv_window,
             socket_events,
             unacked: HashMapDelay::new(config.initial_timeout),
-            pending_reads: VecDeque::new(),
+            reads,
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
@@ -218,7 +219,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         &mut self,
         mut stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         mut writes: mpsc::UnboundedReceiver<Write>,
-        mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> io::Result<()> {
         tracing::debug!("uTP conn starting... {:?}", self.cid.peer);
@@ -299,9 +299,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     idle_timeout.as_mut().reset(idle_deadline);
 
                     self.on_write(write);
-                }
-                Some(read) = reads.recv() => {
-                    self.on_read(read);
                 }
                 _ = self.readable.notified() => {
                     self.process_reads();
@@ -588,60 +585,49 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn process_reads(&mut self) {
-        let recv_buf = match &mut self.state {
-            State::Connecting(..) => return,
-            State::Established { recv_buf, .. } | State::Closing { recv_buf, .. } => recv_buf,
-            State::Closed { err } => {
-                let result = match err {
-                    Some(err) => Err(io::ErrorKind::from(*err)),
-                    None => Ok(vec![]),
-                };
-                while let Some(pending) = self.pending_reads.pop_front() {
-                    let (.., tx) = pending;
-                    let _ = tx.send(result.clone().map_err(io::Error::from));
+        if !self.reads.is_closed() {
+            let recv_buf = match &mut self.state {
+                State::Connecting(..) => return,
+                State::Established { recv_buf, .. } | State::Closing { recv_buf, .. } => recv_buf,
+                State::Closed { err } => {
+                    let result = match err {
+                        Some(err) => Err(io::ErrorKind::from(*err).into()),
+                        None => Ok(vec![]),
+                    };
+
+                    if let Err(err) = self.reads.send(result) {
+                        tracing::warn!(
+                            "unable to push empty vector to read buffer: {}",
+                            err.to_string()
+                        );
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
 
-        while let Some((len, ..)) = self.pending_reads.front() {
-            let mut buf = vec![0; *len];
-            let n = recv_buf.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            } else {
-                let (.., tx) = self.pending_reads.pop_front().unwrap();
-                buf.truncate(n);
-                let _ = tx.send(Ok(buf));
+            while !recv_buf.is_empty() {
+                let mut buf = vec![0; 2048];
+                let n = recv_buf.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                } else {
+                    buf.truncate(n);
+                    if let Err(err) = self.reads.send(Ok(buf)) {
+                        tracing::warn!("unable to push data to read buffer: {}", err.to_string());
+                    }
+                }
             }
-        }
 
-        // If we have reached EOF, then send an empty result to all pending reads.
-        if self.eof() {
-            while let Some((.., tx)) = self.pending_reads.pop_front() {
-                let _ = tx.send(Ok(vec![]));
-            }
-        }
-    }
-
-    fn on_read(&mut self, read: Read) {
-        let (len, tx) = read;
-        match &mut self.state {
-            State::Connecting(..) | State::Established { .. } | State::Closing { .. } => {
-                self.pending_reads.push_back((len, tx))
-            }
-            State::Closed { err } => {
-                let result = match err {
-                    Some(err) => Err(io::Error::from(io::ErrorKind::from(*err))),
-                    None => Ok(vec![]),
-                };
-                let _ = tx.send(result);
+            // If we have reached EOF, then send an empty result to all pending reads.
+            if self.eof() {
+                if let Err(err) = self.reads.send(Ok(vec![])) {
+                    tracing::warn!(
+                        "unable to push empty vector at eof to read buffer: {}",
+                        err.to_string()
+                    );
+                }
             }
         }
-
-        self.process_reads();
-
-        self.readable.notify_waiters();
     }
 
     fn eof(&self) -> bool {
@@ -835,6 +821,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         } = &mut self.state
         {
             if !sent_packets.has_unacked_packets() && recv_buf.ack_num() == *remote {
+                // flush recv_buf before closing the connection
+                self.process_reads();
                 self.state = State::Closed { err: None };
             }
         }
@@ -1187,6 +1175,7 @@ mod test {
     fn conn(endpoint: Endpoint) -> Connection<BUF, SocketAddr> {
         let (connected, _) = oneshot::channel();
         let (socket_events, _) = mpsc::unbounded_channel();
+        let (reads_tx, _) = mpsc::unbounded_channel();
 
         let peer = SocketAddr::from(([127, 0, 0, 1], 3400));
         let cid = ConnectionId {
@@ -1204,7 +1193,7 @@ mod test {
             peer_recv_window: u32::MAX,
             socket_events,
             unacked: HashMapDelay::new(DELAY),
-            pending_reads: VecDeque::new(),
+            reads: reads_tx,
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
