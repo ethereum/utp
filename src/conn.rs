@@ -325,7 +325,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
                         let unacked: Vec<u16> = self.unacked.keys().copied().collect();
                         let finished = match self.state {
-                            State::Closing { local_fin, remote_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap() && remote_fin.is_some(),
+                            State::Closing { local_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap(),
                             _ => false,
                         };
 
