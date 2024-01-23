@@ -1,8 +1,13 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
+use delay_map::HashMapDelay;
+use futures::StreamExt;
+use std::hash::{Hash, Hasher};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
@@ -52,8 +57,9 @@ where
 
         let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
-        let awaiting: HashMap<ConnectionId<P>, Accept<P>> = HashMap::new();
-        let awaiting = Arc::new(RwLock::new(awaiting));
+        // if an accept_with_cid awaiting connection isn't connected in 20 seconds, cancel and log it
+        let mut awaiting: HashMapDelay<u64, ((u16, u16), Accept<P>)> =
+            HashMapDelay::new(Duration::from_secs(20));
 
         let mut incoming_conns = HashMap::new();
 
@@ -98,12 +104,11 @@ where
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
                                     let cid = cid_from_packet(&packet, &src, IdType::RecvId);
-                                    let mut awaiting = awaiting.write().unwrap();
 
                                     // If there was an awaiting connection with the CID, then
                                     // create a new stream for that connection. Otherwise, add the
                                     // connection to the incoming connections.
-                                    if let Some(accept) = awaiting.remove(&cid) {
+                                    if let Some((_, accept)) = awaiting.remove(&calculate_hash(&cid)) {
                                         let (connected_tx, connected_rx) = oneshot::channel();
                                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -143,7 +148,7 @@ where
                         let (cid, syn) = if let Some(syn) = incoming_conns.remove(&cid) {
                             (cid, syn)
                         } else {
-                            awaiting.write().unwrap().insert(cid, accept);
+                            awaiting.insert(calculate_hash(&cid), ((cid.send, cid.recv), accept));
                             continue;
                         };
                         Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
@@ -173,6 +178,14 @@ where
                                 conns.write().unwrap().remove(&cid);
                             }
                         }
+                    }
+                    Some(Ok((_, ((send, recv), accept)))) = awaiting.next() => {
+                        // accept_with_cid didn't recieve an inbound connection within the timeout period
+                        // log it and return a timeout error
+                        tracing::debug!(%send, %recv, "accept_with_cid timed out");
+                        let _ = accept
+                        .stream
+                        .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
                     }
                 }
             }
@@ -392,4 +405,10 @@ impl<P> Drop for UtpSocket<P> {
             let _ = conn.send(StreamEvent::Shutdown);
         }
     }
+}
+
+fn calculate_hash<T: Hash>(t: &T) -> u64 {
+    let mut s = DefaultHasher::new();
+    t.hash(&mut s);
+    s.finish()
 }
