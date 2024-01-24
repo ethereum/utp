@@ -27,6 +27,13 @@ struct Accept<P> {
 }
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
+/// accept_with_cid() has unique interactions compared to accept()
+/// accept() pulls awaiting requests off a queue, but accept_with_cid() only
+/// takes a connection off if CID matches. Because of this if we are awaiting a CID
+/// eventually we need to timeout the await, or the queue would never stop growing with stale awaits
+/// 20 seconds is arbatrary, after the uTP cofig refactor is done that can replace this constant.
+/// but thee uTP config refactor is currently very low priority.
+const AWAITING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
@@ -57,9 +64,9 @@ where
 
         let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
-        // if an accept_with_cid awaiting connection isn't connected in 20 seconds, cancel and log it
+        // if an accept_with_cid awaiting connection isn't connected in AWAITING_CONNECTION_TIMEOUT seconds, cancel and log it
         let mut awaiting: HashMapDelay<u64, ((u16, u16), Accept<P>)> =
-            HashMapDelay::new(Duration::from_secs(20));
+            HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
         let mut incoming_conns = HashMap::new();
 
@@ -184,8 +191,8 @@ where
                         // log it and return a timeout error
                         tracing::debug!(%send, %recv, "accept_with_cid timed out");
                         let _ = accept
-                        .stream
-                        .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
+                            .stream
+                            .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
                     }
                 }
             }
@@ -204,7 +211,7 @@ where
     }
 
     /// WARNING: only accept() or accept_with_cid() can be used in an application.
-    /// they aren't compatible to use interopabily in a program
+    /// they aren't compatible to use interchangeably in a program
     pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
         let accept = Accept {
@@ -221,7 +228,7 @@ where
     }
 
     /// WARNING: only accept() or accept_with_cid() can be used in an application.
-    /// they aren't compatible to use interopabily in a program
+    /// they aren't compatible to use interchangeably in a program
     pub async fn accept_with_cid(
         &self,
         cid: ConnectionId<P>,
