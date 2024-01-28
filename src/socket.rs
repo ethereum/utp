@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use delay_map::HashMapDelay;
+use delay_map::HashSetDelay;
 use futures::StreamExt;
 use std::hash::{Hash, Hasher};
 use tokio::net::UdpSocket;
@@ -65,10 +65,13 @@ where
         let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
 
         // if an accept_with_cid awaiting connection isn't connected in AWAITING_CONNECTION_TIMEOUT seconds, cancel and log it
-        let mut awaiting: HashMapDelay<u64, ((u16, u16), Accept<P>)> =
-            HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
+        let mut awaiting: HashMap<u64, (ConnectionId<P>, Accept<P>)> = HashMap::new();
+        let mut awaiting_expirations: HashSetDelay<u64> =
+            HashSetDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
-        let mut incoming_conns = HashMap::new();
+        let mut incoming_conns: HashMap<u64, (ConnectionId<P>, Packet)> = HashMap::new();
+        let mut incoming_conns_expirations: HashSetDelay<u64> =
+            HashSetDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
@@ -115,7 +118,9 @@ where
                                     // If there was an awaiting connection with the CID, then
                                     // create a new stream for that connection. Otherwise, add the
                                     // connection to the incoming connections.
-                                    if let Some((_, accept)) = awaiting.remove(&calculate_hash(&cid)) {
+                                    let cid_hash = calculate_hash(&cid);
+                                    if let Some((_, accept)) = awaiting.remove(&cid_hash) {
+                                        awaiting_expirations.remove(&cid_hash);
                                         let (connected_tx, connected_rx) = oneshot::channel();
                                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -134,7 +139,9 @@ where
                                             Self::await_connected(stream, accept, connected_rx).await
                                         });
                                     } else {
-                                        incoming_conns.insert(cid, packet);
+                                        let incoming_conns_key = calculate_hash(&cid);
+                                        incoming_conns.insert(incoming_conns_key, (cid, packet));
+                                        incoming_conns_expirations.insert(incoming_conns_key);
                                     }
                                 } else {
                                     tracing::debug!(
@@ -152,17 +159,22 @@ where
                         }
                     }
                     Some((accept, cid)) = accepts_with_cid_rx.recv() => {
-                        let (cid, syn) = if let Some(syn) = incoming_conns.remove(&cid) {
+                        let incoming_conns_key = calculate_hash(&cid);
+                        let (cid, syn) = if let Some((_, syn)) = incoming_conns.remove(&incoming_conns_key) {
+                            incoming_conns_expirations.remove(&incoming_conns_key);
                             (cid, syn)
                         } else {
-                            awaiting.insert(calculate_hash(&cid), ((cid.send, cid.recv), accept));
+                            let cid_hash = calculate_hash(&cid);
+                            awaiting.insert(cid_hash, (cid, accept));
+                            awaiting_expirations.insert(cid_hash);
                             continue;
                         };
                         Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
-                        let cid = incoming_conns.keys().next().unwrap().clone();
-                        let syn = incoming_conns.remove(&cid).unwrap();
+                        let incoming_conns_key = *incoming_conns.keys().next().unwrap();
+                        let (cid, syn) = incoming_conns.remove(&incoming_conns_key).unwrap();
+                        incoming_conns_expirations.remove(&incoming_conns_key);
                         Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(event) = socket_event_rx.recv() => {
@@ -186,13 +198,26 @@ where
                             }
                         }
                     }
-                    Some(Ok((_, ((send, recv), accept)))) = awaiting.next() => {
+                    Some(Ok(awaiting_key)) = awaiting_expirations.next() => {
                         // accept_with_cid didn't recieve an inbound connection within the timeout period
                         // log it and return a timeout error
-                        tracing::debug!(%send, %recv, "accept_with_cid timed out");
-                        let _ = accept
-                            .stream
-                            .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
+                        if let Some((cid, accept)) = awaiting.remove(&calculate_hash(&awaiting_key)) {
+                            tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
+                            let _ = accept
+                                .stream
+                                .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
+                        } else {
+                            unreachable!("Error awaiting_expirations should always contain valid awaiting items")
+                        }
+                    }
+                    Some(Ok(incoming_conns_key)) = incoming_conns_expirations.next() => {
+                        // didn't handle inbound connection within the timeout period
+                        // log it and return a timeout error
+                        if let Some((cid, _)) = incoming_conns.remove(&calculate_hash(&incoming_conns_key)) {
+                            tracing::debug!(%cid.send, %cid.recv, "inbound connection timed out");
+                        } else {
+                            unreachable!("Error incoming_conns_expirations should always contain valid incoming_conns items")
+                        }
                     }
                 }
             }
