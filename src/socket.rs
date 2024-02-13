@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use delay_map::HashSetDelay;
 use futures::StreamExt;
+use rand::{thread_rng, Rng};
 use std::hash::{Hash, Hasher};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
@@ -15,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
 use crate::conn::ConnectionConfig;
 use crate::event::{SocketEvent, StreamEvent};
-use crate::packet::{Packet, PacketType};
+use crate::packet::{Packet, PacketBuilder, PacketType};
 use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
 
@@ -155,6 +156,16 @@ where
                                         acc_cid = ?acc_cid,
                                         "received uTP packet for non-existing conn"
                                     );
+                                    // if we get a packet from an unknown source send a reset packet.
+                                    let random_seq_num = thread_rng().gen_range(0..=65535);
+                                    let reset_packet =
+                                        PacketBuilder::new(PacketType::Reset, packet.conn_id(), crate::time::now_micros(), 100_000, random_seq_num)
+                                            .build();
+                                    let event = SocketEvent::Outgoing((reset_packet, src.clone()));
+                                    if socket_event_tx.send(event).is_err() {
+                                        tracing::warn!("Cannot transmit reset packet: socket closed channel");
+                                        return;
+                                    }
                                 }
                             },
                         }
