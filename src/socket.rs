@@ -26,9 +26,7 @@ struct Accept<P> {
     config: ConnectionConfig,
 }
 
-/// we will never recieve a UDP packet bigger then this, we don't want to allocate
-/// u16 memory in every iteration of the loop as it is only a theorical max size
-const MAX_UDP_PAYLOAD_SIZE: usize = 1500_usize;
+const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
 /// accept_with_cid() has unique interactions compared to accept()
 /// accept() pulls awaiting requests off a queue, but accept_with_cid() only
@@ -58,7 +56,7 @@ impl<P> UtpSocket<P>
 where
     P: ConnectionPeer + 'static,
 {
-    pub fn with_socket<S>(socket: S) -> Self
+    pub fn with_socket<S>(mut socket: S) -> Self
     where
         S: AsyncUdpSocket<P> + 'static,
     {
@@ -76,7 +74,6 @@ where
         let mut incoming_conns_expirations: HashSetDelay<u64> =
             HashSetDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
-        let (socket_reader_tx, mut socket_reader_rx) = mpsc::unbounded_channel();
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
         let (accepts_with_cid_tx, mut accepts_with_cid_rx) = mpsc::unbounded_channel();
@@ -88,25 +85,13 @@ where
             accepts_with_cid: accepts_with_cid_tx,
             socket_events: socket_event_tx.clone(),
         };
-        let socket = Arc::from(socket);
-        let socket_recv = socket.clone();
 
         tokio::spawn(async move {
-            loop {
-                let mut buf = vec![0; MAX_UDP_PAYLOAD_SIZE];
-                tokio::select! {
-                    Ok((n, src)) = socket_recv.recv_from(buf.as_mut()) => {
-                        socket_reader_tx.send((n, src, buf)).expect("Wasn't able to send on socket_reader_tx unbounded channel");
-                    }
-                }
-            }
-        });
-
-        tokio::spawn(async move {
+            let mut buf = [0; MAX_UDP_PAYLOAD_SIZE];
             loop {
                 tokio::select! {
                     biased;
-                    Some((n, src, buf)) = socket_reader_rx.recv() => {
+                    Ok((n, src)) = socket.recv_from(&mut buf) => {
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
