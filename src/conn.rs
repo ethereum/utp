@@ -1018,6 +1018,15 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
     fn reset(&mut self, err: Error) {
         tracing::warn!(?err, "resetting connection: {err}");
+        // If we already sent our fin and got a reset we assume the reciever is using one way acks.
+        // Hence we will consider their reset an acknowledgment that the connection has completed successfully
+        if let State::Closing {
+            local_fin: Some(_), ..
+        } = self.state
+        {
+            self.state = State::Closed { err: None };
+            return;
+        }
         self.state = State::Closed { err: Some(err) }
     }
 
