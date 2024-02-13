@@ -314,26 +314,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 }
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
-                        // Warn that we are quitting the connection, due to a lack of activity.
-
-                        // If both endpoints have exchanged FINs, and our FIN is the only
-                        // unacknowledged packet, then do not emit a warning. It's not a big deal
-                        // that their STATE for our FIN got dropped: we handled their FIN anyway.
                         let unacked: Vec<u16> = self.unacked.keys().copied().collect();
-                        let finished = match self.state {
-                            State::Closing { local_fin, .. } => unacked.len() == 1 && local_fin.is_some() && &local_fin.unwrap() == unacked.last().unwrap(),
-                            _ => false,
-                        };
-
-                        let err = if finished {
-                            tracing::debug!(?self.state, ?unacked, "idle timeout expired, but only missing ACK for local FIN");
-                            None
-                        } else {
-                            tracing::warn!(?self.state, ?unacked, "closing, idle for too long...");
-                            Some(Error::TimedOut)
-                        };
-
-                        self.state = State::Closed { err };
+                        tracing::warn!(?unacked, "idle timeout expired, closing...");
+                        self.state = State::Closed { err: Some(Error::TimedOut) };
                     }
                 }
                 _ = &mut shutdown, if !shutting_down => {
