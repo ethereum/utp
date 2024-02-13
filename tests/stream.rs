@@ -235,14 +235,11 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
     //  - Sender is missing the recipient's FIN and times out with failure
     rx_link_up.store(false, Ordering::SeqCst);
 
-    // Since switching to one-way FIN-ACK, If sender sent fin and everything is acked, but fin the
-    // the transfer is considered successful
-    // close after write() now, and close after reading should error.
     match timeout(EXPECTED_IDLE_TIMEOUT * 2, send_stream.close()).await {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => panic!("Send stream closed successfully, but should have timed out"),
         Ok(Err(e)) => {
             // The stream must time out when waiting to close, because recipient's FIN is missing
-            panic!("Send stream closed successfully, shouldn't have errored out: {e}");
+            assert_eq!(e.kind(), ErrorKind::TimedOut);
         }
         Err(e) => {
             panic!("The send stream did not timeout on close() fast enough, giving up after: {e:?}")
@@ -259,7 +256,7 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
             // The stream will already be disconnected by the read_to_eof() call, so we expect a
             // NotConnected error here.
             assert_eq!(e.kind(), ErrorKind::NotConnected);
-        }
+        },
         Err(e) => {
             panic!("The recv stream did not timeout on close() fast enough, giving up after: {e:?}")
         }
