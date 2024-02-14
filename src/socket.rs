@@ -156,15 +156,18 @@ where
                                         acc_cid = ?acc_cid,
                                         "received uTP packet for non-existing conn"
                                     );
-                                    // if we get a packet from an unknown source send a reset packet.
-                                    let random_seq_num = thread_rng().gen_range(0..=65535);
-                                    let reset_packet =
-                                        PacketBuilder::new(PacketType::Reset, packet.conn_id(), crate::time::now_micros(), 100_000, random_seq_num)
-                                            .build();
-                                    let event = SocketEvent::Outgoing((reset_packet, src.clone()));
-                                    if socket_event_tx.send(event).is_err() {
-                                        tracing::warn!("Cannot transmit reset packet: socket closed channel");
-                                        return;
+                                    // don't send a reset if we are receiving a reset
+                                    if packet.packet_type() != PacketType::Reset {
+                                        // if we get a packet from an unknown source send a reset packet.
+                                        let random_seq_num = thread_rng().gen_range(0..=65535);
+                                        let reset_packet =
+                                            PacketBuilder::new(PacketType::Reset, packet.conn_id(), crate::time::now_micros(), 100_000, random_seq_num)
+                                                .build();
+                                        let event = SocketEvent::Outgoing((reset_packet, src.clone()));
+                                        if socket_event_tx.send(event).is_err() {
+                                            tracing::warn!("Cannot transmit reset packet: socket closed channel");
+                                            return;
+                                        }
                                     }
                                 }
                             },
