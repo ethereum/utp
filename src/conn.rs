@@ -588,7 +588,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         };
 
         while !recv_buf.is_empty() {
-            let mut buf = vec![0; 2048];
+            let mut buf = vec![0; self.config.max_packet_size as usize];
             let n = recv_buf.read(&mut buf).unwrap();
             if n == 0 {
                 break;
@@ -791,7 +791,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             self.readable.notify_one();
         }
 
-        // One way Fin case 1, we are sending data, we send our fin and if it is acked, the reiecever got all our data and we close
+        // One-way Fin: Case 1 - We have sent our data and then our fin. If this fin is acked, then the receiver got all our data and we close
         if let State::Closing {
             local_fin: Some(local),
             remote_fin: None,
@@ -806,7 +806,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
         }
 
-        // One way Fin case 1, we are receiving data, we got the fin and sent an ack acked, close the connection
+        // One-way Fin: Case 2 - We have received data and then the fin. We sent an ack acked, so close the connection
         if let State::Closing {
             local_fin: None,
             remote_fin: Some(remote),
@@ -1018,7 +1018,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
     fn reset(&mut self, err: Error) {
         tracing::warn!(?err, "resetting connection: {err}");
-        // If we already sent our fin and got a reset we assume the reciever already got our fin and has successfully closed their connection.
+        // If we already sent our fin and got a reset we assume the receiver already got our fin and has successfully closed their connection.
         // hence mark this as a successful close.
         if let State::Closing {
             local_fin: Some(_), ..

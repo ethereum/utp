@@ -5,6 +5,7 @@ use tokio::task;
 use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::congestion::DEFAULT_MAX_PACKET_SIZE_BYTES;
 use crate::conn;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
@@ -65,7 +66,7 @@ where
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
         // Reserve space in the buffer to avoid expensive allocation for small reads.
-        buf.reserve(2048);
+        buf.reserve(DEFAULT_MAX_PACKET_SIZE_BYTES as usize);
 
         let mut n = 0;
         loop {
