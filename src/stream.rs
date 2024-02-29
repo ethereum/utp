@@ -5,6 +5,7 @@ use tokio::task;
 use tracing::Instrument;
 
 use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::congestion::DEFAULT_MAX_PACKET_SIZE_BYTES;
 use crate::conn;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
@@ -15,7 +16,7 @@ const BUF: usize = 1024 * 1024;
 
 pub struct UtpStream<P> {
     cid: ConnectionId<P>,
-    reads: mpsc::UnboundedSender<conn::Read>,
+    reads: mpsc::UnboundedReceiver<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
     shutdown: Option<oneshot::Sender<()>>,
     conn_handle: Option<task::JoinHandle<io::Result<()>>>,
@@ -33,21 +34,26 @@ where
         stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         connected: oneshot::Sender<io::Result<()>>,
     ) -> Self {
-        let mut conn =
-            conn::Connection::<BUF, P>::new(cid.clone(), config, syn, connected, socket_events);
-
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (reads_tx, reads_rx) = mpsc::unbounded_channel();
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+        let mut conn = conn::Connection::<BUF, P>::new(
+            cid.clone(),
+            config,
+            syn,
+            connected,
+            socket_events,
+            reads_tx,
+        );
         let conn_handle = tokio::spawn(async move {
-            conn.event_loop(stream_events, writes_rx, reads_rx, shutdown_rx)
+            conn.event_loop(stream_events, writes_rx, shutdown_rx)
                 .instrument(tracing::info_span!("uTP", send = cid.send, recv = cid.recv))
                 .await
         });
 
         Self {
             cid,
-            reads: reads_tx,
+            reads: reads_rx,
             writes: writes_tx,
             shutdown: Some(shutdown_tx),
             conn_handle: Some(conn_handle),
@@ -60,20 +66,15 @@ where
 
     pub async fn read_to_eof(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
         // Reserve space in the buffer to avoid expensive allocation for small reads.
-        buf.reserve(2048);
+        buf.reserve(DEFAULT_MAX_PACKET_SIZE_BYTES as usize);
 
         let mut n = 0;
         loop {
-            let (tx, rx) = oneshot::channel();
-            self.reads
-                .send((buf.capacity(), tx))
-                .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
-
-            match rx.await {
-                Ok(result) => match result {
+            match self.reads.recv().await {
+                Some(data) => match data {
                     Ok(mut data) => {
                         if data.is_empty() {
-                            break Ok(n);
+                            return Ok(n);
                         }
                         n += data.len();
                         buf.append(&mut data);
@@ -84,7 +85,7 @@ where
                     }
                     Err(err) => return Err(err),
                 },
-                Err(err) => return Err(io::Error::new(io::ErrorKind::Other, format!("{err:?}"))),
+                None => tracing::debug!("read buffer was sent None"),
             }
         }
     }

@@ -359,7 +359,7 @@ impl SentPackets {
     ///
     /// Returns `None` if none of the (possibly zero) packets have been acknowledged.
     // TODO: Cache this value, (possibly) updating on each ACK.
-    fn last_ack_num(&self) -> Option<u16> {
+    pub fn last_ack_num(&self) -> Option<u16> {
         if self.packets.is_empty() {
             return None;
         }

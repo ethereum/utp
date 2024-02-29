@@ -248,9 +248,15 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
 
     let mut recv_stream = recv_stream_handle.await.unwrap();
 
+    // Since switching to one-way FIN-ACK, closing after reading is not allowed. We only explicitly
+    // close after write() now, and close after reading should error.
     match timeout(EXPECTED_IDLE_TIMEOUT * 2, recv_stream.close()).await {
-        Ok(Ok(_)) => {} // The receive stream should close successfully: only FIN-ACK is missing
-        Ok(Err(e)) => panic!("Error closing receive stream: {:?}", e),
+        Ok(Ok(_)) => panic!("Closing after reading should have errored, but succeeded"),
+        Ok(Err(e)) => {
+            // The stream will already be disconnected by the read_to_eof() call, so we expect a
+            // NotConnected error here.
+            assert_eq!(e.kind(), ErrorKind::NotConnected);
+        },
         Err(e) => {
             panic!("The recv stream did not timeout on close() fast enough, giving up after: {e:?}")
         }
