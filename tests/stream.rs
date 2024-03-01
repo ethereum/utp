@@ -256,7 +256,7 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
             // The stream will already be disconnected by the read_to_eof() call, so we expect a
             // NotConnected error here.
             assert_eq!(e.kind(), ErrorKind::NotConnected);
-        },
+        }
         Err(e) => {
             panic!("The recv stream did not timeout on close() fast enough, giving up after: {e:?}")
         }
