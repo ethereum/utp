@@ -216,7 +216,7 @@ where
                     Some(Ok(awaiting_key)) = awaiting_expirations.next() => {
                         // accept_with_cid didn't recieve an inbound connection within the timeout period
                         // log it and return a timeout error
-                        if let Some((cid, accept)) = awaiting.remove(&calculate_hash(&awaiting_key)) {
+                        if let Some((cid, accept)) = awaiting.remove(&awaiting_key) {
                             tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
                             let _ = accept
                                 .stream
@@ -228,7 +228,7 @@ where
                     Some(Ok(incoming_conns_key)) = incoming_conns_expirations.next() => {
                         // didn't handle inbound connection within the timeout period
                         // log it and return a timeout error
-                        if let Some((cid, _)) = incoming_conns.remove(&calculate_hash(&incoming_conns_key)) {
+                        if let Some((cid, _)) = incoming_conns.remove(&incoming_conns_key) {
                             tracing::debug!(%cid.send, %cid.recv, "inbound connection timed out");
                         } else {
                             unreachable!("Error incoming_conns_expirations should always contain valid incoming_conns items")
