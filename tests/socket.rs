@@ -13,7 +13,7 @@ const TEST_DATA: &[u8] = &[0xf0; 1_000_000];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn socket() {
-    tracing_subscriber::fmt::init();
+    _ = tracing_subscriber::fmt::try_init();
 
     tracing::info!("starting socket test");
 
