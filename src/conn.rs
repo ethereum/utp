@@ -618,12 +618,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             } => match closing {
                 Some(Closing {
                     local_fin: _,
-                    remote_fin,
-                }) => match remote_fin {
-                    Some(fin) => recv_buf.ack_num() == *fin,
-                    None => false,
-                },
-                None => false,
+                    remote_fin: Some(fin),
+                }) => recv_buf.ack_num() == *fin,
+                _ => false,
             },
             State::Closed { .. } => true,
         }
