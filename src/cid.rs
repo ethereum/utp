@@ -34,6 +34,11 @@ impl<P> StdConnectionIdGenerator<P> {
 
 impl<P: ConnectionPeer> ConnectionIdGenerator<P> for StdConnectionIdGenerator<P> {
     fn cid(&mut self, peer: P, is_initiator: bool) -> ConnectionId<P> {
+        let mut cid = ConnectionId {
+            send: 0,
+            recv: 0,
+            peer,
+        };
         loop {
             let recv: u16 = rand::random();
             let send = if is_initiator {
@@ -41,15 +46,12 @@ impl<P: ConnectionPeer> ConnectionIdGenerator<P> for StdConnectionIdGenerator<P>
             } else {
                 recv.wrapping_sub(1)
             };
-            let cid = ConnectionId {
-                send,
-                recv,
-                peer: peer.clone(),
-            };
+            cid.send = send;
+            cid.recv = recv;
 
             if !self.cids.contains(&cid) {
                 self.cids.insert(cid.clone());
-                break cid;
+                return cid;
             }
         }
     }
