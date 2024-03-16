@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use delay_map::HashSetDelay;
@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cid::{ConnectionId, ConnectionIdGenerator, ConnectionPeer, StdConnectionIdGenerator};
+use crate::cid::{ConnectionId, ConnectionPeer};
 use crate::conn::ConnectionConfig;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType};
@@ -28,6 +28,7 @@ struct Accept<P> {
 }
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
+const CID_GENERATION_TRY_WARNING_COUNT: usize = 10;
 
 /// accept_with_cid() has unique interactions compared to accept()
 /// accept() pulls awaiting requests off a queue, but accept_with_cid() only
@@ -39,7 +40,6 @@ const AWAITING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
-    cid_gen: Mutex<StdConnectionIdGenerator<P>>,
     accepts: UnboundedSender<Accept<P>>,
     accepts_with_cid: UnboundedSender<(Accept<P>, ConnectionId<P>)>,
     socket_events: UnboundedSender<SocketEvent<P>>,
@@ -64,8 +64,6 @@ where
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
-        let cid_gen = Mutex::new(StdConnectionIdGenerator::new());
-
         // if an accept_with_cid awaiting connection isn't connected in AWAITING_CONNECTION_TIMEOUT seconds, cancel and log it
         let mut awaiting: HashMap<u64, (ConnectionId<P>, Accept<P>)> = HashMap::new();
         let mut awaiting_expirations: HashSetDelay<u64> =
@@ -81,7 +79,6 @@ where
 
         let utp = Self {
             conns: Arc::clone(&conns),
-            cid_gen,
             accepts: accepts_tx,
             accepts_with_cid: accepts_with_cid_tx,
             socket_events: socket_event_tx.clone(),
@@ -241,8 +238,44 @@ where
         utp
     }
 
+    /// Internal cid generation
+    fn generate_cid(
+        &self,
+        peer: P,
+        is_initiator: bool,
+        event_tx: Option<UnboundedSender<StreamEvent>>,
+    ) -> ConnectionId<P> {
+        let mut cid = ConnectionId {
+            send: 0,
+            recv: 0,
+            peer,
+        };
+        let mut generation_attempt_count = 0;
+        loop {
+            if generation_attempt_count > CID_GENERATION_TRY_WARNING_COUNT {
+                tracing::error!("cid() tried to generate a cid {generation_attempt_count} times")
+            }
+            let recv: u16 = rand::random();
+            let send = if is_initiator {
+                recv.wrapping_add(1)
+            } else {
+                recv.wrapping_sub(1)
+            };
+            cid.send = send;
+            cid.recv = recv;
+
+            if !self.conns.read().unwrap().contains_key(&cid) {
+                if let Some(event_tx) = event_tx {
+                    self.conns.write().unwrap().insert(cid.clone(), event_tx);
+                }
+                return cid;
+            }
+            generation_attempt_count += 1;
+        }
+    }
+
     pub fn cid(&self, peer: P, is_initiator: bool) -> ConnectionId<P> {
-        self.cid_gen.lock().unwrap().cid(peer, is_initiator)
+        self.generate_cid(peer, is_initiator, None)
     }
 
     /// Returns the number of connections currently open, both inbound and outbound.
@@ -289,13 +322,9 @@ where
     }
 
     pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
-        let cid = self.cid_gen.lock().unwrap().cid(peer, true);
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-
-        {
-            self.conns.write().unwrap().insert(cid.clone(), events_tx);
-        }
+        let cid = self.generate_cid(peer, true, Some(events_tx));
 
         let stream = UtpStream::new(
             cid,
@@ -381,6 +410,14 @@ where
         accept: Accept<P>,
         socket_event_tx: UnboundedSender<SocketEvent<P>>,
     ) {
+        if conns.read().unwrap().contains_key(&cid) {
+            let _ = accept.stream.send(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "connection ID unavailable".to_string(),
+            )));
+            return;
+        }
+
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
