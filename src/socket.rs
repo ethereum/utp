@@ -33,7 +33,7 @@ const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 /// accept() pulls awaiting requests off a queue, but accept_with_cid() only
 /// takes a connection off if CID matches. Because of this if we are awaiting a CID
 /// eventually we need to timeout the await, or the queue would never stop growing with stale awaits
-/// 20 seconds is arbatrary, after the uTP cofig refactor is done that can replace this constant.
+/// 20 seconds is arbitrary, after the uTP config refactor is done that can replace this constant.
 /// but thee uTP config refactor is currently very low priority.
 const AWAITING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -214,7 +214,7 @@ where
                         }
                     }
                     Some(Ok(awaiting_key)) = awaiting_expirations.next() => {
-                        // accept_with_cid didn't recieve an inbound connection within the timeout period
+                        // accept_with_cid didn't receive an inbound connection within the timeout period
                         // log it and return a timeout error
                         if let Some((cid, accept)) = awaiting.remove(&awaiting_key) {
                             tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
