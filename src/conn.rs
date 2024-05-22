@@ -487,16 +487,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             window -= n;
         }
 
+        let mut wrote_data = false;
         // Write as much data as possible into send buffer.
         while let Some((data, ..)) = self.pending_writes.front() {
             if data.len() <= send_buf.available() {
                 let (data, tx) = self.pending_writes.pop_front().unwrap();
                 send_buf.write(&data).unwrap();
                 let _ = tx.send(Ok(data.len()));
-                self.writable.notify_one();
+                wrote_data = true;
             } else {
                 break;
             }
+        }
+
+        if wrote_data {
+            self.writable.notify_one();
         }
 
         // Transmit data packets.
@@ -562,8 +567,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         self.process_writes(Instant::now());
-
-        self.writable.notify_waiters();
     }
 
     fn process_reads(&mut self) {
