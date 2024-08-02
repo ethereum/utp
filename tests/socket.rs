@@ -45,6 +45,43 @@ async fn many_concurrent_transfers() {
     tracing::info!("finished high concurrency load test of {} simultaneous transfers, in {:?}, at a rate of {:.0} Mbps", num_transfers, elapsed, transfer_rate);
 }
 
+#[tokio::test]
+/// Test that a socket can send and receive a large amount of data
+async fn one_huge_data_transfer() {
+    // TODO: test 100MiB or more. Currently, it fails (perhaps due to a rollover at 2^16 packets)
+
+    // At the time of writing, 1024 * 1024 + 1 will hang, because it's bigger than the send buffer,
+    // and the sending logic pauses until the buffer is larger than the pending data.
+    const HUGE_DATA: &[u8] = &[0xf0; 1024 * 1024 * 50];
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    tracing::info!("starting single transfer of huge data test");
+
+    let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3500));
+    let send_addr = SocketAddr::from(([127, 0, 0, 1], 3501));
+
+    let recv = UtpSocket::bind(recv_addr).await.unwrap();
+    let recv = Arc::new(recv);
+    let send = UtpSocket::bind(send_addr).await.unwrap();
+    let send = Arc::new(send);
+
+    let start = Instant::now();
+    let handle =
+        initiate_transfer(0, recv_addr, recv.clone(), send_addr, send.clone(), HUGE_DATA).await;
+
+    // Wait for the sending side of the transfer to complete
+    handle.0.await.unwrap();
+    // Wait for the receiving side of the transfer to complete
+    handle.1.await.unwrap();
+
+    let elapsed = Instant::now() - start;
+    let megabytes_sent = HUGE_DATA.len() as f64 / 1_000_000.0;
+    let megabits_sent = megabytes_sent * 8.0;
+    let transfer_rate = megabits_sent / elapsed.as_secs_f64();
+    tracing::info!("finished single large transfer test with {:.0} MB, in {:?}, at a rate of {:.1} Mbps", megabytes_sent, elapsed, transfer_rate);
+}
+
 async fn initiate_transfer(
     i: u16,
     recv_addr: SocketAddr,
