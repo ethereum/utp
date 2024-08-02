@@ -113,6 +113,15 @@ impl<const N: usize> fmt::Debug for State<N> {
 }
 
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
+type QueuedWrite = (
+    // Remaining bytes to write
+    Vec<u8>,
+    // Number of bytes successfully written in previous partial writes.
+    // Sometimes the content is larger than the buffer and must be written in parts.
+    usize,
+    // oneshot sender to notify about the final result of the write operation
+    oneshot::Sender<io::Result<usize>>,
+);
 pub type Read = io::Result<Vec<u8>>;
 
 #[derive(Clone, Copy, Debug)]
@@ -169,7 +178,7 @@ pub struct Connection<const N: usize, P> {
     unacked: HashMapDelay<u16, Packet>,
     reads: mpsc::UnboundedSender<Read>,
     readable: Notify,
-    pending_writes: VecDeque<Write>,
+    pending_writes: VecDeque<QueuedWrite>,
     writable: Notify,
     latest_timeout: Option<Instant>,
 }
@@ -488,11 +497,20 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         // Write as much data as possible into send buffer.
-        while let Some((data, ..)) = self.pending_writes.front() {
-            if data.len() <= send_buf.available() {
-                let (data, tx) = self.pending_writes.pop_front().unwrap();
-                send_buf.write(&data).unwrap();
-                let _ = tx.send(Ok(data.len()));
+        while self.pending_writes.front().is_some() {
+            let buf_space = send_buf.available();
+            if buf_space > 0 {
+                let (mut data, written, tx) = self.pending_writes.pop_front().unwrap();
+                if data.len() <= buf_space {
+                    send_buf.write(&data).unwrap();
+                    let _ = tx.send(Ok(data.len() + written));
+                } else {
+                    let next_write = data.drain(..buf_space);
+                    send_buf.write(next_write.as_slice()).unwrap();
+                    drop(next_write);
+                    // data was mutated by drain, so we only store the remaining data
+                    self.pending_writes.push_front((data, buf_space + written, tx));
+                }
                 self.writable.notify_one();
             } else {
                 break;
@@ -535,7 +553,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         match &mut self.state {
             State::Connecting(..) => {
-                self.pending_writes.push_back((data, tx));
+                // There are 0 bytes written so far
+                self.pending_writes.push_back((data, 0, tx));
             }
             State::Connected { closing, .. } => match closing {
                 Some(Closing {
@@ -543,13 +562,13 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     remote_fin,
                 }) => {
                     if local_fin.is_none() && remote_fin.is_some() {
-                        self.pending_writes.push_back((data, tx));
+                    self.pending_writes.push_back((data, 0, tx));
                     } else {
                         let _ = tx.send(Ok(0));
                     }
                 }
                 None => {
-                    self.pending_writes.push_back((data, tx));
+                    self.pending_writes.push_back((data, 0, tx));
                 }
             },
             State::Closed { err, .. } => {
