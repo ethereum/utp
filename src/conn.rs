@@ -509,7 +509,8 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     send_buf.write(next_write.as_slice()).unwrap();
                     drop(next_write);
                     // data was mutated by drain, so we only store the remaining data
-                    self.pending_writes.push_front((data, buf_space + written, tx));
+                    self.pending_writes
+                        .push_front((data, buf_space + written, tx));
                 }
                 self.writable.notify_one();
             } else {
@@ -562,7 +563,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     remote_fin,
                 }) => {
                     if local_fin.is_none() && remote_fin.is_some() {
-                    self.pending_writes.push_back((data, 0, tx));
+                        self.pending_writes.push_back((data, 0, tx));
                     } else {
                         let _ = tx.send(Ok(0));
                     }
@@ -823,7 +824,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
         }
 
-        // One-way Fin: Case 2 - We have received data and then the fin. We sent an ack acked, so close the connection
+        // One-way Fin: Case 2 - We have received data and then the fin. We sent an ack, so close the connection
         if let State::Connected {
             closing:
                 Some(Closing {
@@ -840,6 +841,20 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 self.process_reads();
                 self.state = State::Closed { err: None };
             }
+        }
+
+        // One-way Fin: Case 3 - We sent our Fin, but for some reason they sent us a Fin after that and it didn't ack our Fin
+        // We will close the connection and assume they got all of our data and tried to prematurely close the connection as an optimization
+        if let State::Connected {
+            closing:
+                Some(Closing {
+                    local_fin: Some(_),
+                    remote_fin: Some(_),
+                }),
+            ..
+        } = &mut self.state
+        {
+            self.state = State::Closed { err: None };
         }
     }
 
