@@ -30,8 +30,15 @@ async fn many_concurrent_transfers() {
     let num_transfers = 1000;
     for i in 0..num_transfers {
         // step up cid by two to avoid collisions
-        let handle =
-            initiate_transfer(i * 2, recv_addr, recv.clone(), send_addr, send.clone(), TEST_DATA).await;
+        let handle = initiate_transfer(
+            i * 2,
+            recv_addr,
+            recv.clone(),
+            send_addr,
+            send.clone(),
+            TEST_DATA,
+        )
+        .await;
         handles.push(handle.0);
         handles.push(handle.1);
     }
@@ -67,8 +74,15 @@ async fn one_huge_data_transfer() {
     let send = Arc::new(send);
 
     let start = Instant::now();
-    let handle =
-        initiate_transfer(0, recv_addr, recv.clone(), send_addr, send.clone(), HUGE_DATA).await;
+    let handle = initiate_transfer(
+        0,
+        recv_addr,
+        recv.clone(),
+        send_addr,
+        send.clone(),
+        HUGE_DATA,
+    )
+    .await;
 
     // Wait for the sending side of the transfer to complete
     handle.0.await.unwrap();
@@ -79,7 +93,12 @@ async fn one_huge_data_transfer() {
     let megabytes_sent = HUGE_DATA.len() as f64 / 1_000_000.0;
     let megabits_sent = megabytes_sent * 8.0;
     let transfer_rate = megabits_sent / elapsed.as_secs_f64();
-    tracing::info!("finished single large transfer test with {:.0} MB, in {:?}, at a rate of {:.1} Mbps", megabytes_sent, elapsed, transfer_rate);
+    tracing::info!(
+        "finished single large transfer test with {:.0} MB, in {:?}, at a rate of {:.1} Mbps",
+        megabytes_sent,
+        elapsed,
+        transfer_rate
+    );
 }
 
 async fn initiate_transfer(
