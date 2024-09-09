@@ -811,7 +811,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             closing:
                 Some(Closing {
                     local_fin: Some(local),
-                    remote_fin: None,
+                    remote_fin: _,
                 }),
             sent_packets,
             ..
@@ -828,7 +828,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         if let State::Connected {
             closing:
                 Some(Closing {
-                    local_fin: None,
+                    local_fin: _,
                     remote_fin: Some(remote),
                 }),
             sent_packets,
