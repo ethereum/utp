@@ -1,14 +1,12 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use delay_map::HashSetDelay;
+use delay_map::HashMapDelay;
 use futures::StreamExt;
 use rand::{thread_rng, Rng};
-use std::hash::{Hash, Hasher};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
@@ -55,7 +53,7 @@ impl UtpSocket<SocketAddr> {
 
 impl<P> UtpSocket<P>
 where
-    P: ConnectionPeer + 'static,
+    P: ConnectionPeer + Unpin + 'static,
 {
     pub fn with_socket<S>(mut socket: S) -> Self
     where
@@ -64,14 +62,11 @@ where
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
-        // if an accept_with_cid awaiting connection isn't connected in AWAITING_CONNECTION_TIMEOUT seconds, cancel and log it
-        let mut awaiting: HashMap<u64, (ConnectionId<P>, Accept<P>)> = HashMap::new();
-        let mut awaiting_expirations: HashSetDelay<u64> =
-            HashSetDelay::new(AWAITING_CONNECTION_TIMEOUT);
+        let mut awaiting: HashMapDelay<ConnectionId<P>, Accept<P>> =
+            HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
-        let mut incoming_conns: HashMap<u64, (ConnectionId<P>, Packet)> = HashMap::new();
-        let mut incoming_conns_expirations: HashSetDelay<u64> =
-            HashSetDelay::new(AWAITING_CONNECTION_TIMEOUT);
+        let mut incoming_conns: HashMapDelay<ConnectionId<P>, Packet> =
+            HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
@@ -117,9 +112,7 @@ where
                                     // If there was an awaiting connection with the CID, then
                                     // create a new stream for that connection. Otherwise, add the
                                     // connection to the incoming connections.
-                                    let cid_hash = calculate_hash(&cid);
-                                    if let Some((_, accept)) = awaiting.remove(&cid_hash) {
-                                        awaiting_expirations.remove(&cid_hash);
+                                    if let Some(accept) = awaiting.remove(&cid) {
                                         let (connected_tx, connected_rx) = oneshot::channel();
                                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -138,9 +131,7 @@ where
                                             Self::await_connected(stream, accept, connected_rx).await
                                         });
                                     } else {
-                                        let incoming_conns_key = calculate_hash(&cid);
-                                        incoming_conns.insert(incoming_conns_key, (cid, packet));
-                                        incoming_conns_expirations.insert(incoming_conns_key);
+                                        incoming_conns.insert(cid, packet);
                                     }
                                 } else {
                                     tracing::debug!(
@@ -171,23 +162,17 @@ where
                         }
                     }
                     Some((accept, cid)) = accepts_with_cid_rx.recv() => {
-                        let incoming_conns_key = calculate_hash(&cid);
-                        let (cid, syn) = if let Some((_, syn)) = incoming_conns.remove(&incoming_conns_key) {
-                            incoming_conns_expirations.remove(&incoming_conns_key);
-                            (cid, syn)
-                        } else {
-                            let cid_hash = calculate_hash(&cid);
-                            awaiting.insert(cid_hash, (cid, accept));
-                            awaiting_expirations.insert(cid_hash);
+                        let Some(syn) = incoming_conns.remove(&cid) else {
+                            awaiting.insert(cid, accept);
                             continue;
                         };
                         Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
-                        let incoming_conns_key = *incoming_conns.keys().next().unwrap();
-                        let (cid, syn) = incoming_conns.remove(&incoming_conns_key).unwrap();
-                        incoming_conns_expirations.remove(&incoming_conns_key);
-                        Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
+                        let (cid, _) = incoming_conns.iter().next().expect("at least one incoming connection");
+                        let cid = cid.clone();
+                        let packet = incoming_conns.remove(&cid).expect("to delete incoming connection");
+                        Self::select_accept_helper(cid, packet, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(event) = socket_event_rx.recv() => {
                         match event {
@@ -210,26 +195,18 @@ where
                             }
                         }
                     }
-                    Some(Ok(awaiting_key)) = awaiting_expirations.next() => {
+                    Some(Ok((cid, accept))) = awaiting.next() => {
                         // accept_with_cid didn't receive an inbound connection within the timeout period
                         // log it and return a timeout error
-                        if let Some((cid, accept)) = awaiting.remove(&awaiting_key) {
-                            tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
-                            let _ = accept
-                                .stream
-                                .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
-                        } else {
-                            unreachable!("Error awaiting_expirations should always contain valid awaiting items")
-                        }
+                        tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
+                        let _ = accept
+                            .stream
+                            .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
                     }
-                    Some(Ok(incoming_conns_key)) = incoming_conns_expirations.next() => {
+                    Some(Ok((cid, _packet))) = incoming_conns.next() => {
                         // didn't handle inbound connection within the timeout period
                         // log it and return a timeout error
-                        if let Some((cid, _)) = incoming_conns.remove(&incoming_conns_key) {
-                            tracing::debug!(%cid.send, %cid.recv, "inbound connection timed out");
-                        } else {
-                            unreachable!("Error incoming_conns_expirations should always contain valid incoming_conns items")
-                        }
+                        tracing::debug!(%cid.send, %cid.recv, "inbound connection timed out");
                     }
                 }
             }
@@ -489,10 +466,4 @@ impl<P> Drop for UtpSocket<P> {
             let _ = conn.send(StreamEvent::Shutdown);
         }
     }
-}
-
-fn calculate_hash<T: Hash>(t: &T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
 }
