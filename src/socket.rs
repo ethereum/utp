@@ -185,9 +185,9 @@ where
                         }
                     }
                     Some(Ok((cid, accept))) = awaiting.next() => {
-                        // accept_with_cid didn't receive an inbound connection within the timeout period
+                        // accept didn't receive an inbound connection within the timeout period
                         // log it and return a timeout error
-                        tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
+                        tracing::debug!(%cid.send, %cid.recv, "accept timed out");
                         let _ = accept
                             .stream
                             .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
@@ -236,7 +236,7 @@ where
         self.conns.read().unwrap().len()
     }
 
-    pub async fn accept_with_cid(
+    pub async fn accept(
         &self,
         cid: ConnectionId<P>,
         config: ConnectionConfig,
@@ -255,7 +255,7 @@ where
         }
     }
 
-    pub async fn connect_with_cid(
+    pub async fn connect(
         &self,
         cid: ConnectionId<P>,
         config: ConnectionConfig,

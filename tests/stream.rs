@@ -27,22 +27,14 @@ async fn close_is_successful_when_write_completes() {
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
-    let recv_one_handle = tokio::spawn(async move {
-        recv_one
-            .accept_with_cid(recv_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let recv_one_handle =
+        tokio::spawn(async move { recv_one.accept(recv_cid, conn_config).await.unwrap() });
 
     // Keep a clone of the socket so that it doesn't drop when moved into the task.
     // Dropping it causes all connections to exit.
     let send_one = Arc::clone(&send);
-    let send_one_handle = tokio::spawn(async move {
-        send_one
-            .connect_with_cid(send_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let send_one_handle =
+        tokio::spawn(async move { send_one.connect(send_cid, conn_config).await.unwrap() });
 
     let (tx_one, rx_one) = tokio::join!(send_one_handle, recv_one_handle,);
     let mut send_stream = tx_one.unwrap();
@@ -98,22 +90,14 @@ async fn close_errors_if_all_packets_dropped() {
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
-    let recv_one_handle = tokio::spawn(async move {
-        recv_one
-            .accept_with_cid(recv_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let recv_one_handle =
+        tokio::spawn(async move { recv_one.accept(recv_cid, conn_config).await.unwrap() });
 
     // Keep a clone of the socket so that it doesn't drop when moved into the task.
     // Dropping it causes all connections to exit.
     let send_one = Arc::clone(&send);
-    let send_one_handle = tokio::spawn(async move {
-        send_one
-            .connect_with_cid(send_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let send_one_handle =
+        tokio::spawn(async move { send_one.connect(send_cid, conn_config).await.unwrap() });
 
     let (tx_one, rx_one) = tokio::join!(send_one_handle, recv_one_handle,);
     let mut send_stream = tx_one.unwrap();
@@ -176,22 +160,14 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
-    let recv_one_handle = tokio::spawn(async move {
-        recv_one
-            .accept_with_cid(recv_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let recv_one_handle =
+        tokio::spawn(async move { recv_one.accept(recv_cid, conn_config).await.unwrap() });
 
     // Keep a clone of the socket so that it doesn't drop when moved into the task.
     // Dropping it causes all connections to exit.
     let send_one = Arc::clone(&send);
-    let send_one_handle = tokio::spawn(async move {
-        send_one
-            .connect_with_cid(send_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let send_one_handle =
+        tokio::spawn(async move { send_one.connect(send_cid, conn_config).await.unwrap() });
 
     let (tx_one, rx_one) = tokio::join!(send_one_handle, recv_one_handle,);
     let mut send_stream = tx_one.unwrap();

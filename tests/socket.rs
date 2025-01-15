@@ -124,7 +124,7 @@ async fn initiate_transfer(
     };
 
     let recv_handle = tokio::spawn(async move {
-        let mut stream = recv.accept_with_cid(recv_cid, conn_config).await.unwrap();
+        let mut stream = recv.accept(recv_cid, conn_config).await.unwrap();
         let mut buf = vec![];
         let n = match stream.read_to_eof(&mut buf).await {
             Ok(num_bytes) => num_bytes,
@@ -141,7 +141,7 @@ async fn initiate_transfer(
     });
 
     let send_handle = tokio::spawn(async move {
-        let mut stream = send.connect_with_cid(send_cid, conn_config).await.unwrap();
+        let mut stream = send.connect(send_cid, conn_config).await.unwrap();
         let n = stream.write(data).await.unwrap();
         assert_eq!(n, data.len());
 
@@ -183,20 +183,12 @@ async fn test_socket_reports_two_connections() {
     };
 
     let recv_one = Arc::clone(&recv);
-    let recv_one_handle = tokio::spawn(async move {
-        recv_one
-            .accept_with_cid(recv_one_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let recv_one_handle =
+        tokio::spawn(async move { recv_one.accept(recv_one_cid, conn_config).await.unwrap() });
 
     let send_one = Arc::clone(&send);
-    let send_one_handle = tokio::spawn(async move {
-        send_one
-            .connect_with_cid(send_one_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let send_one_handle =
+        tokio::spawn(async move { send_one.connect(send_one_cid, conn_config).await.unwrap() });
 
     let recv_two_cid = cid::ConnectionId {
         send: 200,
@@ -210,20 +202,12 @@ async fn test_socket_reports_two_connections() {
     };
 
     let recv_two = Arc::clone(&recv);
-    let recv_two_handle = tokio::spawn(async move {
-        recv_two
-            .accept_with_cid(recv_two_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let recv_two_handle =
+        tokio::spawn(async move { recv_two.accept(recv_two_cid, conn_config).await.unwrap() });
 
     let send_two = Arc::clone(&send);
-    let send_two_handle = tokio::spawn(async move {
-        send_two
-            .connect_with_cid(send_two_cid, conn_config)
-            .await
-            .unwrap()
-    });
+    let send_two_handle =
+        tokio::spawn(async move { send_two.connect(send_two_cid, conn_config).await.unwrap() });
 
     let (tx_one, rx_one, tx_two, rx_two) = tokio::join!(
         send_one_handle,
