@@ -28,18 +28,15 @@ struct Accept<P> {
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
 const CID_GENERATION_TRY_WARNING_COUNT: usize = 10;
 
-/// accept_with_cid() has unique interactions compared to accept()
-/// accept() pulls awaiting requests off a queue, but accept_with_cid() only
-/// takes a connection off if CID matches. Because of this if we are awaiting a CID
-/// eventually we need to timeout the await, or the queue would never stop growing with stale awaits
+/// The awaiting and incoming connections are waiting in queue until the CID matches.
+/// In order to prevent queue from growing indefinitely, we need to timeout stale connecitons.
 /// 20 seconds is arbitrary, after the uTP config refactor is done that can replace this constant.
 /// but thee uTP config refactor is currently very low priority.
 const AWAITING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct UtpSocket<P> {
     conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
-    accepts: UnboundedSender<Accept<P>>,
-    accepts_with_cid: UnboundedSender<(Accept<P>, ConnectionId<P>)>,
+    accepts: UnboundedSender<(Accept<P>, ConnectionId<P>)>,
     socket_events: UnboundedSender<SocketEvent<P>>,
 }
 
@@ -70,12 +67,10 @@ where
 
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
         let (accepts_tx, mut accepts_rx) = mpsc::unbounded_channel();
-        let (accepts_with_cid_tx, mut accepts_with_cid_rx) = mpsc::unbounded_channel();
 
         let utp = Self {
             conns: Arc::clone(&conns),
             accepts: accepts_tx,
-            accepts_with_cid: accepts_with_cid_tx,
             socket_events: socket_event_tx.clone(),
         };
 
@@ -161,18 +156,12 @@ where
                             },
                         }
                     }
-                    Some((accept, cid)) = accepts_with_cid_rx.recv() => {
+                    Some((accept, cid)) = accepts_rx.recv() => {
                         let Some(syn) = incoming_conns.remove(&cid) else {
                             awaiting.insert(cid, accept);
                             continue;
                         };
                         Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
-                    }
-                    Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
-                        let (cid, _) = incoming_conns.iter().next().expect("at least one incoming connection");
-                        let cid = cid.clone();
-                        let packet = incoming_conns.remove(&cid).expect("to delete incoming connection");
-                        Self::select_accept_helper(cid, packet, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(event) = socket_event_rx.recv() => {
                         match event {
@@ -205,7 +194,7 @@ where
                     }
                     Some(Ok((cid, _packet))) = incoming_conns.next() => {
                         // didn't handle inbound connection within the timeout period
-                        // log it and return a timeout error
+                        // log it
                         tracing::debug!(%cid.send, %cid.recv, "inbound connection timed out");
                     }
                 }
@@ -215,13 +204,7 @@ where
         utp
     }
 
-    /// Internal cid generation
-    fn generate_cid(
-        &self,
-        peer: P,
-        is_initiator: bool,
-        event_tx: Option<UnboundedSender<StreamEvent>>,
-    ) -> ConnectionId<P> {
+    pub fn cid(&self, peer: P, is_initiator: bool) -> ConnectionId<P> {
         let mut cid = ConnectionId {
             send: 0,
             recv: 0,
@@ -242,17 +225,10 @@ where
             cid.recv = recv;
 
             if !self.conns.read().unwrap().contains_key(&cid) {
-                if let Some(event_tx) = event_tx {
-                    self.conns.write().unwrap().insert(cid.clone(), event_tx);
-                }
                 return cid;
             }
             generation_attempt_count += 1;
         }
-    }
-
-    pub fn cid(&self, peer: P, is_initiator: bool) -> ConnectionId<P> {
-        self.generate_cid(peer, is_initiator, None)
     }
 
     /// Returns the number of connections currently open, both inbound and outbound.
@@ -260,25 +236,6 @@ where
         self.conns.read().unwrap().len()
     }
 
-    /// WARNING: only accept() or accept_with_cid() can be used in an application.
-    /// they aren't compatible to use interchangeably in a program
-    pub async fn accept(&self, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
-        let (stream_tx, stream_rx) = oneshot::channel();
-        let accept = Accept {
-            stream: stream_tx,
-            config,
-        };
-        self.accepts
-            .send(accept)
-            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
-        match stream_rx.await {
-            Ok(stream) => Ok(stream?),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
-        }
-    }
-
-    /// WARNING: only accept() or accept_with_cid() can be used in an application.
-    /// they aren't compatible to use interchangeably in a program
     pub async fn accept_with_cid(
         &self,
         cid: ConnectionId<P>,
@@ -289,32 +246,11 @@ where
             stream: stream_tx,
             config,
         };
-        self.accepts_with_cid
+        self.accepts
             .send((accept, cid))
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
-            Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
-        }
-    }
-
-    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
-        let (connected_tx, connected_rx) = oneshot::channel();
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let cid = self.generate_cid(peer, true, Some(events_tx));
-
-        let stream = UtpStream::new(
-            cid,
-            config,
-            None,
-            self.socket_events.clone(),
-            events_rx,
-            connected_tx,
-        );
-
-        match connected_rx.await {
-            Ok(Ok(..)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
             Err(..) => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
     }
