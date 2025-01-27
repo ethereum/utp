@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::cid::ConnectionId;
+use crate::peer::{ConnectionPeer, Peer};
 use crate::udp::AsyncUdpSocket;
 
 /// A mock socket that can be used to simulate a perfect link.
@@ -38,8 +39,8 @@ impl AsyncUdpSocket<char> for MockUdpSocket {
     ///
     /// Panics if `target` is not equal to `self.only_peer`. This socket is built to support
     /// exactly two peers communicating with each other, so it will panic if used with more.
-    async fn send_to(&mut self, buf: &[u8], target: &char) -> io::Result<usize> {
-        if target != &self.only_peer {
+    async fn send_to(&mut self, buf: &[u8], peer: &Peer<char>) -> io::Result<usize> {
+        if peer.id() != &self.only_peer {
             panic!("MockUdpSocket only supports sending to one peer");
         }
         if !self.is_up() {
@@ -58,7 +59,7 @@ impl AsyncUdpSocket<char> for MockUdpSocket {
     /// # Panics
     ///
     /// Panics if `buf` is smaller than the packet size.
-    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, char)> {
+    async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, Peer<char>)> {
         let packet = self
             .inbound
             .recv()
@@ -69,11 +70,21 @@ impl AsyncUdpSocket<char> for MockUdpSocket {
         }
         let packet_len = packet.len();
         buf[..packet_len].copy_from_slice(&packet[..]);
-        Ok((packet_len, self.only_peer))
+        Ok((packet_len, Peer::new(self.only_peer)))
     }
 }
 
-impl ConnectionPeer for char {}
+impl ConnectionPeer for char {
+    type Id = char;
+
+    fn id(&self) -> Self::Id {
+        *self
+    }
+
+    fn merge(&mut self, other: Self) {
+        assert!(*self == other)
+    }
+}
 
 fn build_link_pair() -> (MockUdpSocket, MockUdpSocket) {
     let (peer_a, peer_b): (char, char) = ('A', 'B');
@@ -110,12 +121,12 @@ fn build_connection_id_pair_starting_at(
     let a_cid = ConnectionId {
         send: higher_id,
         recv: lower_id,
-        peer: socket_a.only_peer,
+        peer_id: socket_a.only_peer,
     };
     let b_cid = ConnectionId {
         send: lower_id,
         recv: higher_id,
-        peer: socket_b.only_peer,
+        peer_id: socket_b.only_peer,
     };
     (a_cid, b_cid)
 }

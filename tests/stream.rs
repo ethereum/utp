@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use utp_rs::conn::{ConnectionConfig, DEFAULT_MAX_IDLE_TIMEOUT};
+use utp_rs::peer::Peer;
 use utp_rs::socket::UtpSocket;
 
 use utp_rs::testutils;
@@ -29,7 +30,7 @@ async fn close_is_successful_when_write_completes() {
     let recv_one = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
         recv_one
-            .accept_with_cid(recv_cid, conn_config)
+            .accept_with_cid(recv_cid, Peer::new_id(recv_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
@@ -39,7 +40,7 @@ async fn close_is_successful_when_write_completes() {
     let send_one = Arc::clone(&send);
     let send_one_handle = tokio::spawn(async move {
         send_one
-            .connect_with_cid(send_cid, conn_config)
+            .connect_with_cid(send_cid, Peer::new_id(send_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
@@ -100,7 +101,7 @@ async fn close_errors_if_all_packets_dropped() {
     let recv_one = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
         recv_one
-            .accept_with_cid(recv_cid, conn_config)
+            .accept_with_cid(recv_cid, Peer::new_id(recv_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
@@ -110,7 +111,7 @@ async fn close_errors_if_all_packets_dropped() {
     let send_one = Arc::clone(&send);
     let send_one_handle = tokio::spawn(async move {
         send_one
-            .connect_with_cid(send_cid, conn_config)
+            .connect_with_cid(send_cid, Peer::new_id(send_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
@@ -178,7 +179,7 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
     let recv_one = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
         recv_one
-            .accept_with_cid(recv_cid, conn_config)
+            .accept_with_cid(recv_cid, Peer::new_id(recv_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
@@ -188,7 +189,7 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
     let send_one = Arc::clone(&send);
     let send_one_handle = tokio::spawn(async move {
         send_one
-            .connect_with_cid(send_cid, conn_config)
+            .connect_with_cid(send_cid, Peer::new_id(send_cid.peer_id), conn_config)
             .await
             .unwrap()
     });
