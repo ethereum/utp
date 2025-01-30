@@ -5,6 +5,10 @@ use crate::seq::CircularRangeInclusive;
 
 type Bytes = Vec<u8>;
 
+// https://github.com/ethereum/utp/issues/139
+// Maximum number of selective ACKs that can fit within the length of 8 bits
+const MAX_SELECTIVE_ACK_COUNT: usize = 32 * 63;
+
 #[derive(Clone, Debug)]
 pub struct ReceiveBuffer<const N: usize> {
     buf: Box<[u8; N]>,
@@ -112,7 +116,7 @@ impl<const N: usize> ReceiveBuffer<N> {
         let mut pending_packets = self.pending.keys().copied().collect::<HashSet<_>>();
 
         let mut acked = vec![];
-        while !pending_packets.is_empty() {
+        while !pending_packets.is_empty() && acked.len() < MAX_SELECTIVE_ACK_COUNT {
             if pending_packets.remove(&last_ack) {
                 acked.push(true);
             } else {
