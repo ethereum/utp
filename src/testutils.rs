@@ -81,8 +81,9 @@ impl ConnectionPeer for char {
         *self
     }
 
-    fn merge(&mut self, other: Self) {
-        assert!(*self == other)
+    fn consolidate(a: Self, b: Self) -> Self {
+        assert!(a == b, "Consolidating non-equal peers");
+        a
     }
 }
 

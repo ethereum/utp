@@ -121,7 +121,7 @@ where
                                     // create a new stream for that connection. Otherwise, add the
                                     // connection to the incoming connections.
                                     if let Some(accept_with_cid) = awaiting.remove(&cid) {
-                                        peer.merge(accept_with_cid.peer);
+                                        peer.consolidate(accept_with_cid.peer);
 
                                         let (connected_tx, connected_rx) = oneshot::channel();
                                         let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -177,7 +177,7 @@ where
                             awaiting.insert(accept_with_cid.cid.clone(), accept_with_cid);
                             continue;
                         };
-                        peer.merge(accept_with_cid.peer);
+                        peer.consolidate(accept_with_cid.peer);
                         Self::select_accept_helper(accept_with_cid.cid, peer, syn, conns.clone(), accept_with_cid.accept, socket_event_tx.clone());
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {

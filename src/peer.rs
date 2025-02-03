@@ -9,10 +9,25 @@ pub trait ConnectionPeer: Debug + Clone + Send + Sync {
     /// Returns peer's id
     fn id(&self) -> Self::Id;
 
-    /// Merge the given object into `Self` whilst consuming it.
+    /// Consolidates two peers into one.
+    ///
+    /// It's possible that we have two instances that represent the same peer (equal `peer_id`),
+    /// and we need to consolidate them into one. This can happen when [Peer]-s passed with
+    /// [UtpSocket::accept_with_cid](crate::socket::UtpSocket::accept_with_cid) or
+    /// [UtpSocket::connect_with_cid](crate::socket::UtpSocket::connect_with_cid), and returned by
+    /// [AsyncUdpSocket::recv_from](crate::udp::AsyncUdpSocket::recv_from) contain peers (not just
+    /// `peer_id`).
+    ///
+    /// The structure implementing this trait can decide on the exact behavior. Some examples:
+    /// - If structure is simple (i.e. two peers are the same iff all fields are the same), return
+    ///   either (see implementation for `SocketAddr`)
+    /// - If we can determine which peer is newer (e.g. using timestamp or version field), return
+    ///   newer peer
+    /// - If structure behaves more like a key-value map whose values don't change over time,
+    ///   merge key-value pairs from both instances into one
     ///
     /// Should panic if ids are not matching.
-    fn merge(&mut self, other: Self);
+    fn consolidate(a: Self, b: Self) -> Self;
 }
 
 impl ConnectionPeer for SocketAddr {
@@ -22,8 +37,9 @@ impl ConnectionPeer for SocketAddr {
         *self
     }
 
-    fn merge(&mut self, other: Self) {
-        assert!(self == &other)
+    fn consolidate(a: Self, b: Self) -> Self {
+        assert!(a == b, "Consolidating non-equal peers");
+        a
     }
 }
 
@@ -61,20 +77,19 @@ impl<P: ConnectionPeer> Peer<P> {
         self.peer.as_ref()
     }
 
-    /// Merge the given peer into `Self` whilst consuming it.
+    /// Consolidates given peer into `Self` whilst consuming it.
+    ///
+    /// See [ConnectionPeer::consolidate] for details.
     ///
     /// Panics if ids are not matching.
-    pub fn merge(&mut self, other: Self) {
-        assert!(self.id == other.id);
+    pub fn consolidate(&mut self, other: Self) {
+        assert!(self.id == other.id, "Consolidating with non-equal peer");
         let Some(other_peer) = other.peer else {
             return;
         };
 
         self.peer = match self.peer.take() {
-            Some(mut peer) => {
-                peer.merge(other_peer);
-                Some(peer)
-            }
+            Some(peer) => Some(P::consolidate(peer, other_peer)),
             None => Some(other_peer),
         };
     }
