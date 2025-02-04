@@ -237,7 +237,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut writes: mpsc::UnboundedReceiver<Write>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> io::Result<()> {
-        tracing::debug!("uTP conn starting... {:?}", self.cid.peer_id);
+        tracing::debug!("uTP conn starting... {:?}", self.peer);
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.

@@ -96,7 +96,7 @@ where
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
-                                tracing::warn!(?peer_id, "unable to decode uTP packet");
+                                tracing::warn!(?peer, "unable to decode uTP packet");
                                 continue;
                             }
                         };
@@ -115,7 +115,7 @@ where
                             }
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
-                                    let cid = cid_from_packet::<P>(&packet, peer_id, IdType::RecvId);
+                                    let cid = acc_cid;
 
                                     // If there was an awaiting connection with the CID, then
                                     // create a new stream for that connection. Otherwise, add the
