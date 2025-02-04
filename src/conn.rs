@@ -8,10 +8,12 @@ use delay_map::HashMapDelay;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::cid::ConnectionId;
 use crate::congestion;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
+use crate::peer::ConnectionPeer;
+use crate::peer::Peer;
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
 use crate::sent::{SentPackets, SentPacketsError};
@@ -167,9 +169,10 @@ impl From<ConnectionConfig> for congestion::Config {
     }
 }
 
-pub struct Connection<const N: usize, P> {
+pub struct Connection<const N: usize, P: ConnectionPeer> {
     state: State<N>,
-    cid: ConnectionId<P>,
+    cid: ConnectionId<P::Id>,
+    peer: Peer<P>,
     config: ConnectionConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
@@ -185,7 +188,8 @@ pub struct Connection<const N: usize, P> {
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     pub fn new(
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         config: ConnectionConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
@@ -212,6 +216,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         Self {
             state: State::Connecting(Some(connected)),
             cid,
+            peer,
             config,
             endpoint,
             peer_ts_diff,
@@ -232,7 +237,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         mut writes: mpsc::UnboundedReceiver<Write>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> io::Result<()> {
-        tracing::debug!("uTP conn starting... {:?}", self.cid.peer);
+        tracing::debug!("uTP conn starting... {:?}", self.peer);
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.
@@ -240,7 +245,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             Endpoint::Initiator((syn_seq_num, ..)) => {
                 let syn = self.syn_packet(syn_seq_num);
                 self.socket_events
-                    .send(SocketEvent::Outgoing((syn.clone(), self.cid.peer.clone())))
+                    .send(SocketEvent::Outgoing((syn.clone(), self.peer.clone())))
                     .unwrap();
                 self.unacked
                     .insert_at(syn_seq_num, syn, self.config.initial_timeout);
@@ -250,7 +255,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             Endpoint::Acceptor((syn, syn_ack)) => {
                 let state = self.state_packet().unwrap();
                 self.socket_events
-                    .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
+                    .send(SocketEvent::Outgoing((state, self.peer.clone())))
                     .unwrap();
 
                 let recv_buf = ReceiveBuffer::new(syn);
@@ -409,7 +414,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                                 &mut self.unacked,
                                 &mut self.socket_events,
                                 fin,
-                                &self.cid.peer,
+                                &self.peer,
                                 Instant::now(),
                             );
                         }
@@ -441,7 +446,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                                 &mut self.unacked,
                                 &mut self.socket_events,
                                 fin,
-                                &self.cid.peer,
+                                &self.peer,
                                 Instant::now(),
                             );
                         }
@@ -542,7 +547,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 &mut self.unacked,
                 &mut self.socket_events,
                 packet,
-                &self.cid.peer,
+                &self.peer,
                 now,
             );
             seq_num = seq_num.wrapping_add(1);
@@ -680,7 +685,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         let packet = self.syn_packet(seq);
                         let _ = self
                             .socket_events
-                            .send(SocketEvent::Outgoing((packet, self.cid.peer.clone())));
+                            .send(SocketEvent::Outgoing((packet, self.peer.clone())));
                     }
                 }
                 Endpoint::Acceptor(..) => {}
@@ -728,7 +733,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     &mut self.unacked,
                     &mut self.socket_events,
                     packet,
-                    &self.cid.peer,
+                    &self.peer,
                     now,
                 );
             }
@@ -784,7 +789,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
-                    let event = SocketEvent::Outgoing((state, self.cid.peer.clone()));
+                    let event = SocketEvent::Outgoing((state, self.peer.clone()));
                     if self.socket_events.send(event).is_err() {
                         tracing::warn!("Cannot transmit state packet: socket closed channel");
                         return;
@@ -1156,7 +1161,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 &mut self.unacked,
                 &mut self.socket_events,
                 packet,
-                &self.cid.peer,
+                &self.peer,
                 now,
             );
         }
@@ -1167,7 +1172,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         unacked: &mut HashMapDelay<u16, Packet>,
         socket_events: &mut mpsc::UnboundedSender<SocketEvent<P>>,
         packet: Packet,
-        dest: &P,
+        peer: &Peer<P>,
         now: Instant,
     ) {
         let (payload, len) = if packet.payload().is_empty() {
@@ -1189,7 +1194,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
-        let outbound = SocketEvent::Outgoing((packet, dest.clone()));
+        let outbound = SocketEvent::Outgoing((packet, peer.clone()));
         if socket_events.send(outbound).is_err() {
             tracing::warn!("Cannot transmit packet: socket closed channel");
         }
@@ -1214,12 +1219,13 @@ mod test {
         let cid = ConnectionId {
             send: 101,
             recv: 100,
-            peer,
+            peer_id: peer,
         };
 
         Connection {
             state: State::Connecting(Some(connected)),
             cid,
+            peer: Peer::new(peer),
             config: ConnectionConfig::default(),
             endpoint,
             peer_ts_diff: Duration::from_millis(100),

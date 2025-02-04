@@ -4,18 +4,19 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task;
 use tracing::Instrument;
 
-use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::cid::ConnectionId;
 use crate::congestion::DEFAULT_MAX_PACKET_SIZE_BYTES;
 use crate::conn;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::Packet;
+use crate::peer::{ConnectionPeer, Peer};
 
 /// The size of the send and receive buffers.
 // TODO: Make the buffer size configurable.
 const BUF: usize = 1024 * 1024;
 
-pub struct UtpStream<P> {
-    cid: ConnectionId<P>,
+pub struct UtpStream<P: ConnectionPeer> {
+    cid: ConnectionId<P::Id>,
     reads: mpsc::UnboundedReceiver<conn::Read>,
     writes: mpsc::UnboundedSender<conn::Write>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -27,7 +28,8 @@ where
     P: ConnectionPeer + 'static,
 {
     pub(crate) fn new(
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         config: conn::ConnectionConfig,
         syn: Option<Packet>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
@@ -39,6 +41,7 @@ where
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
         let mut conn = conn::Connection::<BUF, P>::new(
             cid.clone(),
+            peer,
             config,
             syn,
             connected,
@@ -60,7 +63,7 @@ where
         }
     }
 
-    pub fn cid(&self) -> &ConnectionId<P> {
+    pub fn cid(&self) -> &ConnectionId<P::Id> {
         &self.cid
     }
 
@@ -117,7 +120,7 @@ where
     }
 }
 
-impl<P> UtpStream<P> {
+impl<P: ConnectionPeer> UtpStream<P> {
     // Send signal to the connection event loop to exit, after all outgoing writes have completed.
     // Public callers should use close() instead.
     fn shutdown(&mut self) -> io::Result<()> {
@@ -130,7 +133,7 @@ impl<P> UtpStream<P> {
     }
 }
 
-impl<P> Drop for UtpStream<P> {
+impl<P: ConnectionPeer> Drop for UtpStream<P> {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }

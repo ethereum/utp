@@ -11,18 +11,25 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::cid::ConnectionId;
 use crate::conn::ConnectionConfig;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType};
+use crate::peer::{ConnectionPeer, Peer};
 use crate::stream::UtpStream;
 use crate::udp::AsyncUdpSocket;
 
 type ConnChannel = UnboundedSender<StreamEvent>;
 
-struct Accept<P> {
+struct Accept<P: ConnectionPeer> {
     stream: oneshot::Sender<io::Result<UtpStream<P>>>,
     config: ConnectionConfig,
+}
+
+struct AcceptWithCidPeer<P: ConnectionPeer> {
+    cid: ConnectionId<P::Id>,
+    peer: Peer<P>,
+    accept: Accept<P>,
 }
 
 const MAX_UDP_PAYLOAD_SIZE: usize = u16::MAX as usize;
@@ -36,10 +43,10 @@ const CID_GENERATION_TRY_WARNING_COUNT: usize = 10;
 /// but thee uTP config refactor is currently very low priority.
 const AWAITING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub struct UtpSocket<P> {
-    conns: Arc<RwLock<HashMap<ConnectionId<P>, ConnChannel>>>,
+pub struct UtpSocket<P: ConnectionPeer> {
+    conns: Arc<RwLock<HashMap<ConnectionId<P::Id>, ConnChannel>>>,
     accepts: UnboundedSender<Accept<P>>,
-    accepts_with_cid: UnboundedSender<(Accept<P>, ConnectionId<P>)>,
+    accepts_with_cid: UnboundedSender<AcceptWithCidPeer<P>>,
     socket_events: UnboundedSender<SocketEvent<P>>,
 }
 
@@ -53,7 +60,7 @@ impl UtpSocket<SocketAddr> {
 
 impl<P> UtpSocket<P>
 where
-    P: ConnectionPeer + Unpin + 'static,
+    P: ConnectionPeer<Id: Unpin> + Unpin + 'static,
 {
     pub fn with_socket<S>(mut socket: S) -> Self
     where
@@ -62,10 +69,10 @@ where
         let conns = HashMap::new();
         let conns = Arc::new(RwLock::new(conns));
 
-        let mut awaiting: HashMapDelay<ConnectionId<P>, Accept<P>> =
+        let mut awaiting: HashMapDelay<ConnectionId<P::Id>, AcceptWithCidPeer<P>> =
             HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
-        let mut incoming_conns: HashMapDelay<ConnectionId<P>, Packet> =
+        let mut incoming_conns: HashMapDelay<ConnectionId<P::Id>, (Peer<P>, Packet)> =
             HashMapDelay::new(AWAITING_CONNECTION_TIMEOUT);
 
         let (socket_event_tx, mut socket_event_rx) = mpsc::unbounded_channel();
@@ -84,18 +91,19 @@ where
             loop {
                 tokio::select! {
                     biased;
-                    Ok((n, src)) = socket.recv_from(&mut buf) => {
+                    Ok((n, mut peer)) = socket.recv_from(&mut buf) => {
+                        let peer_id = peer.id();
                         let packet = match Packet::decode(&buf[..n]) {
                             Ok(pkt) => pkt,
                             Err(..) => {
-                                tracing::warn!(?src, "unable to decode uTP packet");
+                                tracing::warn!(?peer, "unable to decode uTP packet");
                                 continue;
                             }
                         };
 
-                        let peer_init_cid = cid_from_packet(&packet, &src, IdType::SendIdPeerInitiated);
-                        let we_init_cid = cid_from_packet(&packet, &src, IdType::SendIdWeInitiated);
-                        let acc_cid = cid_from_packet(&packet, &src, IdType::RecvId);
+                        let peer_init_cid = cid_from_packet::<P>(&packet, peer_id, IdType::SendIdPeerInitiated);
+                        let we_init_cid = cid_from_packet::<P>(&packet, peer_id, IdType::SendIdWeInitiated);
+                        let acc_cid = cid_from_packet::<P>(&packet, peer_id, IdType::RecvId);
                         let mut conns = conns.write().unwrap();
                         let conn = conns
                             .get(&acc_cid)
@@ -107,12 +115,14 @@ where
                             }
                             None => {
                                 if std::matches!(packet.packet_type(), PacketType::Syn) {
-                                    let cid = cid_from_packet(&packet, &src, IdType::RecvId);
+                                    let cid = acc_cid;
 
                                     // If there was an awaiting connection with the CID, then
                                     // create a new stream for that connection. Otherwise, add the
                                     // connection to the incoming connections.
-                                    if let Some(accept) = awaiting.remove(&cid) {
+                                    if let Some(accept_with_cid) = awaiting.remove(&cid) {
+                                        peer.consolidate(accept_with_cid.peer);
+
                                         let (connected_tx, connected_rx) = oneshot::channel();
                                         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
@@ -120,7 +130,8 @@ where
 
                                         let stream = UtpStream::new(
                                             cid,
-                                            accept.config,
+                                            peer,
+                                            accept_with_cid.accept.config,
                                             Some(packet),
                                             socket_event_tx.clone(),
                                             events_rx,
@@ -128,10 +139,10 @@ where
                                         );
 
                                         tokio::spawn(async move {
-                                            Self::await_connected(stream, accept, connected_rx).await
+                                            Self::await_connected(stream, accept_with_cid.accept.stream, connected_rx).await
                                         });
                                     } else {
-                                        incoming_conns.insert(cid, packet);
+                                        incoming_conns.insert(cid, (peer, packet));
                                     }
                                 } else {
                                     tracing::debug!(
@@ -151,7 +162,7 @@ where
                                         let reset_packet =
                                             PacketBuilder::new(PacketType::Reset, packet.conn_id(), crate::time::now_micros(), 100_000, random_seq_num)
                                                 .build();
-                                        let event = SocketEvent::Outgoing((reset_packet, src.clone()));
+                                        let event = SocketEvent::Outgoing((reset_packet, peer));
                                         if socket_event_tx.send(event).is_err() {
                                             tracing::warn!("Cannot transmit reset packet: socket closed channel");
                                             return;
@@ -161,18 +172,19 @@ where
                             },
                         }
                     }
-                    Some((accept, cid)) = accepts_with_cid_rx.recv() => {
-                        let Some(syn) = incoming_conns.remove(&cid) else {
-                            awaiting.insert(cid, accept);
+                    Some(accept_with_cid) = accepts_with_cid_rx.recv() => {
+                        let Some((mut peer, syn)) = incoming_conns.remove(&accept_with_cid.cid) else {
+                            awaiting.insert(accept_with_cid.cid.clone(), accept_with_cid);
                             continue;
                         };
-                        Self::select_accept_helper(cid, syn, conns.clone(), accept, socket_event_tx.clone());
+                        peer.consolidate(accept_with_cid.peer);
+                        Self::select_accept_helper(accept_with_cid.cid, peer, syn, conns.clone(), accept_with_cid.accept, socket_event_tx.clone());
                     }
                     Some(accept) = accepts_rx.recv(), if !incoming_conns.is_empty() => {
-                        let (cid, _) = incoming_conns.iter().next().expect("at least one incoming connection");
+                        let cid = incoming_conns.keys().next().expect("at least one incoming connection");
                         let cid = cid.clone();
-                        let packet = incoming_conns.remove(&cid).expect("to delete incoming connection");
-                        Self::select_accept_helper(cid, packet, conns.clone(), accept, socket_event_tx.clone());
+                        let (peer, packet) = incoming_conns.remove(&cid).expect("to delete incoming connection");
+                        Self::select_accept_helper(cid, peer, packet, conns.clone(), accept, socket_event_tx.clone());
                     }
                     Some(event) = socket_event_rx.recv() => {
                         match event {
@@ -195,11 +207,11 @@ where
                             }
                         }
                     }
-                    Some(Ok((cid, accept))) = awaiting.next() => {
+                    Some(Ok((cid, accept_with_cid))) = awaiting.next() => {
                         // accept_with_cid didn't receive an inbound connection within the timeout period
                         // log it and return a timeout error
                         tracing::debug!(%cid.send, %cid.recv, "accept_with_cid timed out");
-                        let _ = accept
+                        let _ = accept_with_cid.accept
                             .stream
                             .send(Err(io::Error::from(io::ErrorKind::TimedOut)));
                     }
@@ -218,14 +230,14 @@ where
     /// Internal cid generation
     fn generate_cid(
         &self,
-        peer: P,
+        peer_id: P::Id,
         is_initiator: bool,
         event_tx: Option<UnboundedSender<StreamEvent>>,
-    ) -> ConnectionId<P> {
+    ) -> ConnectionId<P::Id> {
         let mut cid = ConnectionId {
             send: 0,
             recv: 0,
-            peer,
+            peer_id,
         };
         let mut generation_attempt_count = 0;
         loop {
@@ -251,8 +263,8 @@ where
         }
     }
 
-    pub fn cid(&self, peer: P, is_initiator: bool) -> ConnectionId<P> {
-        self.generate_cid(peer, is_initiator, None)
+    pub fn cid(&self, peer_id: P::Id, is_initiator: bool) -> ConnectionId<P::Id> {
+        self.generate_cid(peer_id, is_initiator, None)
     }
 
     /// Returns the number of connections currently open, both inbound and outbound.
@@ -281,16 +293,21 @@ where
     /// they aren't compatible to use interchangeably in a program
     pub async fn accept_with_cid(
         &self,
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         config: ConnectionConfig,
     ) -> io::Result<UtpStream<P>> {
         let (stream_tx, stream_rx) = oneshot::channel();
-        let accept = Accept {
-            stream: stream_tx,
-            config,
+        let accept = AcceptWithCidPeer {
+            cid,
+            peer,
+            accept: Accept {
+                stream: stream_tx,
+                config,
+            },
         };
         self.accepts_with_cid
-            .send((accept, cid))
+            .send(accept)
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
         match stream_rx.await {
             Ok(stream) => Ok(stream?),
@@ -298,13 +315,18 @@ where
         }
     }
 
-    pub async fn connect(&self, peer: P, config: ConnectionConfig) -> io::Result<UtpStream<P>> {
+    pub async fn connect(
+        &self,
+        peer: Peer<P>,
+        config: ConnectionConfig,
+    ) -> io::Result<UtpStream<P>> {
         let (connected_tx, connected_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let cid = self.generate_cid(peer, true, Some(events_tx));
+        let cid = self.generate_cid(peer.id().clone(), true, Some(events_tx));
 
         let stream = UtpStream::new(
             cid,
+            peer,
             config,
             None,
             self.socket_events.clone(),
@@ -321,7 +343,8 @@ where
 
     pub async fn connect_with_cid(
         &self,
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         config: ConnectionConfig,
     ) -> io::Result<UtpStream<P>> {
         if self.conns.read().unwrap().contains_key(&cid) {
@@ -340,6 +363,7 @@ where
 
         let stream = UtpStream::new(
             cid.clone(),
+            peer,
             config,
             None,
             self.socket_events.clone(),
@@ -362,28 +386,27 @@ where
 
     async fn await_connected(
         stream: UtpStream<P>,
-        accept: Accept<P>,
+        callback: oneshot::Sender<io::Result<UtpStream<P>>>,
         connected: oneshot::Receiver<io::Result<()>>,
     ) {
         match connected.await {
             Ok(Ok(..)) => {
-                let _ = accept.stream.send(Ok(stream));
+                let _ = callback.send(Ok(stream));
             }
             Ok(Err(err)) => {
-                let _ = accept.stream.send(Err(err));
+                let _ = callback.send(Err(err));
             }
             Err(..) => {
-                let _ = accept
-                    .stream
-                    .send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
+                let _ = callback.send(Err(io::Error::from(io::ErrorKind::ConnectionAborted)));
             }
         }
     }
 
     fn select_accept_helper(
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         syn: Packet,
-        conns: Arc<RwLock<HashMap<ConnectionId<P>, UnboundedSender<StreamEvent>>>>,
+        conns: Arc<RwLock<HashMap<ConnectionId<P::Id>, ConnChannel>>>,
         accept: Accept<P>,
         socket_event_tx: UnboundedSender<SocketEvent<P>>,
     ) {
@@ -404,6 +427,7 @@ where
 
         let stream = UtpStream::new(
             cid,
+            peer,
             accept.config,
             Some(syn),
             socket_event_tx,
@@ -411,7 +435,9 @@ where
             connected_tx,
         );
 
-        tokio::spawn(async move { Self::await_connected(stream, accept, connected_rx).await });
+        tokio::spawn(
+            async move { Self::await_connected(stream, accept.stream, connected_rx).await },
+        );
     }
 }
 
@@ -424,9 +450,10 @@ enum IdType {
 
 fn cid_from_packet<P: ConnectionPeer>(
     packet: &Packet,
-    src: &P,
+    peer_id: &P::Id,
     id_type: IdType,
-) -> ConnectionId<P> {
+) -> ConnectionId<P::Id> {
+    let peer_id = peer_id.clone();
     match id_type {
         IdType::RecvId => {
             let (send, recv) = match packet.packet_type() {
@@ -438,7 +465,7 @@ fn cid_from_packet<P: ConnectionPeer>(
             ConnectionId {
                 send,
                 recv,
-                peer: src.clone(),
+                peer_id,
             }
         }
         IdType::SendIdWeInitiated => {
@@ -446,7 +473,7 @@ fn cid_from_packet<P: ConnectionPeer>(
             ConnectionId {
                 send,
                 recv,
-                peer: src.clone(),
+                peer_id,
             }
         }
         IdType::SendIdPeerInitiated => {
@@ -454,13 +481,13 @@ fn cid_from_packet<P: ConnectionPeer>(
             ConnectionId {
                 send,
                 recv,
-                peer: src.clone(),
+                peer_id,
             }
         }
     }
 }
 
-impl<P> Drop for UtpSocket<P> {
+impl<P: ConnectionPeer> Drop for UtpSocket<P> {
     fn drop(&mut self) {
         for conn in self.conns.read().unwrap().values() {
             let _ = conn.send(StreamEvent::Shutdown);

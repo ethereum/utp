@@ -1,6 +1,7 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use utp_rs::peer::Peer;
 
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -115,16 +116,19 @@ async fn initiate_transfer(
     let recv_cid = cid::ConnectionId {
         send: initiator_cid,
         recv: responder_cid,
-        peer: send_addr,
+        peer_id: send_addr,
     };
     let send_cid = cid::ConnectionId {
         send: responder_cid,
         recv: initiator_cid,
-        peer: recv_addr,
+        peer_id: recv_addr,
     };
 
     let recv_handle = tokio::spawn(async move {
-        let mut stream = recv.accept_with_cid(recv_cid, conn_config).await.unwrap();
+        let mut stream = recv
+            .accept_with_cid(recv_cid, Peer::new(send_addr), conn_config)
+            .await
+            .unwrap();
         let mut buf = vec![];
         let n = match stream.read_to_eof(&mut buf).await {
             Ok(num_bytes) => num_bytes,
@@ -141,7 +145,10 @@ async fn initiate_transfer(
     });
 
     let send_handle = tokio::spawn(async move {
-        let mut stream = send.connect_with_cid(send_cid, conn_config).await.unwrap();
+        let mut stream = send
+            .connect_with_cid(send_cid, Peer::new(recv_addr), conn_config)
+            .await
+            .unwrap();
         let n = stream.write(data).await.unwrap();
         assert_eq!(n, data.len());
 
@@ -174,18 +181,18 @@ async fn test_socket_reports_two_connections() {
     let recv_one_cid = cid::ConnectionId {
         send: 100,
         recv: 101,
-        peer: send_addr,
+        peer_id: send_addr,
     };
     let send_one_cid = cid::ConnectionId {
         send: 101,
         recv: 100,
-        peer: recv_addr,
+        peer_id: recv_addr,
     };
 
     let recv_one = Arc::clone(&recv);
     let recv_one_handle = tokio::spawn(async move {
         recv_one
-            .accept_with_cid(recv_one_cid, conn_config)
+            .accept_with_cid(recv_one_cid, Peer::new(send_addr), conn_config)
             .await
             .unwrap()
     });
@@ -193,7 +200,7 @@ async fn test_socket_reports_two_connections() {
     let send_one = Arc::clone(&send);
     let send_one_handle = tokio::spawn(async move {
         send_one
-            .connect_with_cid(send_one_cid, conn_config)
+            .connect_with_cid(send_one_cid, Peer::new(recv_addr), conn_config)
             .await
             .unwrap()
     });
@@ -201,18 +208,18 @@ async fn test_socket_reports_two_connections() {
     let recv_two_cid = cid::ConnectionId {
         send: 200,
         recv: 201,
-        peer: send_addr,
+        peer_id: send_addr,
     };
     let send_two_cid = cid::ConnectionId {
         send: 201,
         recv: 200,
-        peer: recv_addr,
+        peer_id: recv_addr,
     };
 
     let recv_two = Arc::clone(&recv);
     let recv_two_handle = tokio::spawn(async move {
         recv_two
-            .accept_with_cid(recv_two_cid, conn_config)
+            .accept_with_cid(recv_two_cid, Peer::new(send_addr), conn_config)
             .await
             .unwrap()
     });
@@ -220,7 +227,7 @@ async fn test_socket_reports_two_connections() {
     let send_two = Arc::clone(&send);
     let send_two_handle = tokio::spawn(async move {
         send_two
-            .connect_with_cid(send_two_cid, conn_config)
+            .connect_with_cid(send_two_cid, Peer::new(recv_addr), conn_config)
             .await
             .unwrap()
     });
