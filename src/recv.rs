@@ -1,7 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
-
 use crate::packet::SelectiveAck;
 use crate::seq::CircularRangeInclusive;
+use std::collections::{BTreeMap, HashSet};
 
 type Bytes = Vec<u8>;
 
@@ -77,26 +76,32 @@ impl<const N: usize> ReceiveBuffer<N> {
     /// Panics if `data.len()` is greater than the amount of available bytes in the buffer and the
     /// data for `seq_num` has not already been written.
     pub fn write(&mut self, data: &[u8], seq_num: u16) {
-        if self.was_written(seq_num) {
+        // Reject packets that are either already received or too old.
+        if self.was_written(seq_num) || !seq_after(seq_num, self.ack_num()) {
             return;
         }
 
-        // TODO: Return error instead of panicking.
         if data.len() > self.available() {
             panic!("insufficient space in buffer");
         }
 
-        // Read all sequential data from pending packets.
+        // Clean up any pending packets that are now outdated.
+        // They should be strictly after ack_num()+1.
+        let current_ack_plus1 = self.ack_num().wrapping_add(1);
+        self.pending
+            .retain(|&seq, _| seq_after(seq, current_ack_plus1));
+
+        // Insert the new packet.
         self.pending.insert(seq_num, data.to_vec());
-        let start = self.init_seq_num.wrapping_add(1);
-        let mut next = start.wrapping_add(self.consumed);
+
+        // Process contiguous pending packets.
+        let mut next = self.ack_num().wrapping_add(1);
         while let Some(data) = self.pending.remove(&next) {
             let end = self.offset + data.len();
             self.buf.as_mut_slice()[self.offset..end].copy_from_slice(&data[..]);
-
             self.offset = end;
             self.consumed += 1;
-            next = next.wrapping_add(1);
+            next = self.ack_num().wrapping_add(1);
         }
     }
 
@@ -127,6 +132,11 @@ impl<const N: usize> ReceiveBuffer<N> {
 
         Some(SelectiveAck::new(acked))
     }
+}
+
+/// Returns `true` if `a` is strictly after `b` in the sequence space.
+fn seq_after(a: u16, b: u16) -> bool {
+    a.wrapping_sub(b) < 32768 && a != b
 }
 
 #[cfg(test)]
@@ -328,5 +338,95 @@ mod test {
         acked[1] = true;
         acked[3] = true;
         assert_eq!(selective_ack.acked(), acked);
+    }
+
+    #[test]
+    fn test_seq_after() {
+        // Basic ordering.
+        assert!(seq_after(10, 9)); // 10 is after 9.
+        assert!(!seq_after(9, 10)); // 9 is not after 10.
+        assert!(!seq_after(10, 10)); // Equal numbers: false.
+
+        // Wrap-around behavior.
+        // For 16-bit sequence numbers, 0 is after 65535.
+        assert!(seq_after(0, 65535));
+        assert!(!seq_after(65535, 0));
+    }
+
+    /// When a packet’s sequence number is not strictly after ack_num()+1 (i.e. it is stale or already processed), it should be ignored.
+    #[test]
+    fn stale_packet_insertion_is_ignored() {
+        let init_seq_num = 100;
+        let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
+        let data = vec![0xab; 10];
+
+        // Write the in-order packet.
+        buf.write(&data, init_seq_num.wrapping_add(1));
+        // Now ack_num() is init_seq_num+1.
+        assert_eq!(buf.ack_num(), init_seq_num.wrapping_add(1));
+
+        // Try inserting a packet with a sequence number that is NOT strictly after ack_num()+1.
+        // That is, trying to insert a packet with seq == ack_num()+1 (or lower) should be ignored.
+        buf.write(&data, init_seq_num.wrapping_add(1)); // duplicate/in-order packet.
+        buf.write(&data, init_seq_num); // too old
+                                        // The pending set should remain empty.
+        assert!(buf.pending.is_empty());
+    }
+
+    /// Simulate a scenario where an out‐of‐order packet is inserted (and sits in pending),
+    /// then contiguous packets are received, advancing ack_num(), and finally a stale packet is attempted.
+    /// The stale packet should be dropped during cleanup.
+    #[test]
+    fn stale_pending_packet_cleanup() {
+        let init_seq_num = 200;
+        let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
+        let data = vec![0xcd; 10];
+
+        // Insert an out-of-order packet (this one will be held in pending).
+        let out_of_order_seq = init_seq_num.wrapping_add(2);
+        buf.write(&data, out_of_order_seq);
+        assert!(buf.pending.contains_key(&out_of_order_seq));
+
+        // Now insert the missing in-order packet.
+        buf.write(&data, init_seq_num.wrapping_add(1));
+        // The contiguous region now includes both packets.
+        assert_eq!(buf.ack_num(), out_of_order_seq);
+        // And pending should have been cleaned up.
+        assert!(buf.pending.is_empty());
+
+        // Now try inserting a packet that is stale relative to the new ack.
+        buf.write(&data, out_of_order_seq); // same as ack_num() (or not strictly > ack_num()+1)
+                                            // The packet should be rejected, so pending remains empty.
+        assert!(buf.pending.is_empty());
+    }
+
+    /// Verify that the cleanup and insertion logic works properly when the sequence numbers wrap around.
+    #[test]
+    fn wrap_around_behavior() {
+        // Choose an init_seq_num near the maximum.
+        let init_seq_num = u16::MAX - 2;
+        let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
+        let data = vec![0xef; 64];
+
+        // Insert an out-of-order packet near the wrap-around boundary.
+        let seq1 = init_seq_num.wrapping_add(2); // should be MAX (u16::MAX)
+        buf.write(&data, seq1);
+        assert!(buf.pending.contains_key(&seq1));
+
+        // Insert the missing in-order packet.
+        let seq0 = init_seq_num.wrapping_add(1);
+        buf.write(&data, seq0);
+        // Now, ack_num() should advance to seq1.
+        assert_eq!(buf.ack_num(), seq1);
+        // pending should be empty.
+        assert!(buf.pending.is_empty());
+
+        // Insert a packet that wraps around (seq becomes 0 after u16::MAX).
+        let seq_wrap = init_seq_num.wrapping_add(3); // should be 0
+        buf.write(&data, seq_wrap);
+        // Since the next expected is ack_num()+1 (i.e. u16::MAX.wrapping_add(1) == 0),
+        // insertion of seq_wrap (which equals 0) is NOT allowed.
+        // pending should remain empty.
+        assert!(!buf.pending.contains_key(&seq_wrap));
     }
 }
