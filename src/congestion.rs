@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 pub(crate) const DEFAULT_TARGET_MICROS: u32 = 100_000;
 pub(crate) const DEFAULT_INITIAL_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const DEFAULT_MIN_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const DEFAULT_MAX_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_MAX_PACKET_SIZE_BYTES: u32 = 1024;
 const DEFAULT_GAIN: f32 = 1.0;
 const DEFAULT_DELAY_WINDOW: Duration = Duration::from_secs(120);
@@ -41,6 +42,7 @@ pub struct Config {
     pub target_delay_micros: u32,
     pub initial_timeout: Duration,
     pub min_timeout: Duration,
+    pub max_timeout: Duration,
     pub max_packet_size_bytes: u32,
     pub max_window_size_inc_bytes: u32,
     pub gain: f32,
@@ -53,6 +55,7 @@ impl Default for Config {
             target_delay_micros: DEFAULT_TARGET_MICROS,
             initial_timeout: DEFAULT_INITIAL_TIMEOUT,
             min_timeout: DEFAULT_MIN_TIMEOUT,
+            max_timeout: DEFAULT_MAX_TIMEOUT,
             max_packet_size_bytes: DEFAULT_MAX_PACKET_SIZE_BYTES,
             max_window_size_inc_bytes: DEFAULT_MAX_PACKET_SIZE_BYTES,
             gain: DEFAULT_GAIN,
@@ -66,6 +69,7 @@ pub struct Controller {
     target_delay_micros: u32,
     timeout: Duration,
     min_timeout: Duration,
+    max_timeout: Duration,
     window_size_bytes: u32,
     max_window_size_bytes: u32,
     min_window_size_bytes: u32,
@@ -84,6 +88,7 @@ impl Controller {
             target_delay_micros: config.target_delay_micros,
             timeout: config.initial_timeout,
             min_timeout: config.min_timeout,
+            max_timeout: config.max_timeout,
             window_size_bytes: 0,
             max_window_size_bytes: 2 * config.max_packet_size_bytes,
             min_window_size_bytes: 2 * config.max_packet_size_bytes,
@@ -260,7 +265,7 @@ impl Controller {
     /// Registers a timeout with the controller.
     pub fn on_timeout(&mut self) {
         self.max_window_size_bytes = self.min_window_size_bytes;
-        self.timeout *= 2;
+        self.timeout = cmp::min(self.timeout * 2, self.max_timeout);
     }
 
     /// Adjusts the maximum window (i.e. congestion window) by `adjustment`, keeping the size of
@@ -288,10 +293,14 @@ impl Controller {
     ///
     /// The congestion timeout cannot fall below the configured minimum.
     fn apply_timeout_adjustment(&mut self) {
+        // Do not let timeout go below minimum.
         self.timeout = cmp::max(
             self.rtt + Duration::from_micros(self.rtt_variance_micros * 4),
             self.min_timeout,
         );
+
+        // Do not let timeout go above maximum.
+        self.timeout = cmp::min(self.timeout, self.max_timeout)
     }
 }
 
@@ -313,7 +322,7 @@ fn compute_max_window_size_adjustment(
     //
     // The base delay adjustment should not panic because the base delay is non-negative and
     // should not be larger than the current delay.
-    let delay_micros = i64::try_from(packet_delay_micros - base_delay_micros).unwrap();
+    let delay_micros = i64::from(packet_delay_micros - base_delay_micros);
 
     let off_target_micros = i64::from(target_delay_micros) - delay_micros;
     let delay_factor = (off_target_micros as f64) / f64::from(target_delay_micros);
@@ -674,6 +683,22 @@ mod tests {
             ctrl.on_timeout();
             assert_eq!(ctrl.max_window_size_bytes, ctrl.min_window_size_bytes);
             assert_eq!(ctrl.timeout, initial_timeout * 2);
+        }
+
+        #[test]
+        fn on_timeout_not_exceed_max() {
+            const MAX_TIMEOUT: Duration = Duration::from_secs(3);
+            let config = Config {
+                initial_timeout: Duration::from_secs(2),
+                max_timeout: MAX_TIMEOUT,
+                ..Default::default()
+            };
+
+            let mut ctrl = Controller::new(config);
+
+            // Register a timeout.
+            ctrl.on_timeout();
+            assert_eq!(ctrl.timeout, MAX_TIMEOUT);
         }
     }
 

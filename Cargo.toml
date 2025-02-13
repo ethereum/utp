@@ -1,20 +1,20 @@
 [package]
 name = "utp-rs"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.8"
 edition = "2021"
-authors = ["Jacob Kaufmann"]
+authors = ["Jacob Kaufmann", "Jason Carver"]
 description = "uTorrent transport protocol"
 readme = "README.md"
-repository = "https://github.com/jacobkaufmann/utp/"
+repository = "https://github.com/ethereum/utp/"
 license = "MIT"
 keywords = ["utp"]
-categories = ["network programming"]
+categories = ["network-programming"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 async-trait = "0.1.64"
-delay_map = "0.1.2"
+delay_map = "0.3.0"
 futures = "0.3.26"
 rand = "0.8.5"
 tokio = { version = "1.25.0", features = ["io-util", "rt-multi-thread", "macros", "net", "sync", "time"] }
@@ -22,4 +22,8 @@ tracing = { version = "0.1.37", features = ["std", "attributes", "log"] }
 
 [dev-dependencies]
 quickcheck = "1.0.3"
+tokio = { version = "1.25.0", features = ["test-util"] }
 tracing-subscriber = "0.3.16"
+
+[profile.test]
+opt-level = 3

@@ -8,14 +8,15 @@ use delay_map::HashMapDelay;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
-use crate::cid::{ConnectionId, ConnectionPeer};
+use crate::cid::ConnectionId;
 use crate::congestion;
 use crate::event::{SocketEvent, StreamEvent};
 use crate::packet::{Packet, PacketBuilder, PacketType, SelectiveAck};
+use crate::peer::ConnectionPeer;
+use crate::peer::Peer;
 use crate::recv::ReceiveBuffer;
 use crate::send::SendBuffer;
-use crate::sent::SentPackets;
-use crate::seq::CircularRangeInclusive;
+use crate::sent::{SentPackets, SentPacketsError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Error {
@@ -60,52 +61,96 @@ impl From<Error> for io::ErrorKind {
     }
 }
 
+impl From<Error> for io::Error {
+    fn from(err: Error) -> Self {
+        let err_kind = io::ErrorKind::from(err);
+        err_kind.into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Endpoint {
     Initiator((u16, usize)),
     Acceptor((u16, u16)),
 }
 
+struct Closing {
+    local_fin: Option<u16>,
+    remote_fin: Option<u16>,
+}
+
 enum State<const N: usize> {
     Connecting(Option<oneshot::Sender<io::Result<()>>>),
-    Established {
+    Connected {
         recv_buf: ReceiveBuffer<N>,
         send_buf: SendBuffer<N>,
         sent_packets: SentPackets,
-    },
-    Closing {
-        local_fin: Option<u16>,
-        remote_fin: Option<u16>,
-        recv_buf: ReceiveBuffer<N>,
-        send_buf: SendBuffer<N>,
-        sent_packets: SentPackets,
+        closing: Option<Closing>,
     },
     Closed {
         err: Option<Error>,
     },
 }
 
+impl<const N: usize> fmt::Debug for State<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connecting(_) => write!(f, "State::Connecting"),
+            Self::Connected { closing, .. } => match closing {
+                Some(Closing {
+                    local_fin,
+                    remote_fin,
+                }) => f
+                    .debug_struct("State::Connected: in Closing state")
+                    .field("local_fin", local_fin)
+                    .field("remote_fin", remote_fin)
+                    .finish(),
+                None => f
+                    .debug_struct("State::Connected: Established state")
+                    .finish(),
+            },
+            Self::Closed { err } => f.debug_struct("State::Closed").field("err", err).finish(),
+        }
+    }
+}
+
 pub type Write = (Vec<u8>, oneshot::Sender<io::Result<usize>>);
-pub type Read = (usize, oneshot::Sender<io::Result<Vec<u8>>>);
+type QueuedWrite = (
+    // Remaining bytes to write
+    Vec<u8>,
+    // Number of bytes successfully written in previous partial writes.
+    // Sometimes the content is larger than the buffer and must be written in parts.
+    usize,
+    // oneshot sender to notify about the final result of the write operation
+    oneshot::Sender<io::Result<usize>>,
+);
+pub type Read = io::Result<Vec<u8>>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionConfig {
     pub max_packet_size: u16,
+    /// The maximum number of connection attempts to make before giving up.
+    /// Note: if the max_idle_timeout is set too low, then the connection may time out before all
+    /// these attempts can be executed.
     pub max_conn_attempts: usize,
     pub max_idle_timeout: Duration,
     pub initial_timeout: Duration,
     pub min_timeout: Duration,
+    pub max_timeout: Duration,
     pub target_delay: Duration,
 }
+
+pub const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            max_conn_attempts: 3,
-            max_idle_timeout: Duration::from_secs(10),
+            max_conn_attempts: 6,
+            max_idle_timeout: DEFAULT_MAX_IDLE_TIMEOUT,
             max_packet_size: congestion::DEFAULT_MAX_PACKET_SIZE_BYTES as u16,
             initial_timeout: congestion::DEFAULT_INITIAL_TIMEOUT,
             min_timeout: congestion::DEFAULT_MIN_TIMEOUT,
+            max_timeout: DEFAULT_MAX_IDLE_TIMEOUT / 4,
             target_delay: Duration::from_micros(congestion::DEFAULT_TARGET_MICROS.into()),
         }
     }
@@ -117,34 +162,39 @@ impl From<ConnectionConfig> for congestion::Config {
             max_packet_size_bytes: u32::from(value.max_packet_size),
             initial_timeout: value.initial_timeout,
             min_timeout: value.min_timeout,
+            max_timeout: value.max_timeout,
             target_delay_micros: value.target_delay.as_micros() as u32,
             ..Default::default()
         }
     }
 }
 
-pub struct Connection<const N: usize, P> {
+pub struct Connection<const N: usize, P: ConnectionPeer> {
     state: State<N>,
-    cid: ConnectionId<P>,
+    cid: ConnectionId<P::Id>,
+    peer: Peer<P>,
     config: ConnectionConfig,
     endpoint: Endpoint,
     peer_ts_diff: Duration,
     peer_recv_window: u32,
     socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
     unacked: HashMapDelay<u16, Packet>,
-    pending_reads: VecDeque<Read>,
+    reads: mpsc::UnboundedSender<Read>,
     readable: Notify,
-    pending_writes: VecDeque<Write>,
+    pending_writes: VecDeque<QueuedWrite>,
     writable: Notify,
+    latest_timeout: Option<Instant>,
 }
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     pub fn new(
-        cid: ConnectionId<P>,
+        cid: ConnectionId<P::Id>,
+        peer: Peer<P>,
         config: ConnectionConfig,
         syn: Option<Packet>,
         connected: oneshot::Sender<io::Result<()>>,
         socket_events: mpsc::UnboundedSender<SocketEvent<P>>,
+        reads: mpsc::UnboundedSender<Read>,
     ) -> Self {
         let (endpoint, peer_ts_diff, peer_recv_window) = match syn {
             Some(syn) => {
@@ -166,16 +216,18 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         Self {
             state: State::Connecting(Some(connected)),
             cid,
+            peer,
             config,
             endpoint,
             peer_ts_diff,
             peer_recv_window,
             socket_events,
             unacked: HashMapDelay::new(config.initial_timeout),
-            pending_reads: VecDeque::new(),
+            reads,
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
@@ -183,10 +235,9 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         &mut self,
         mut stream_events: mpsc::UnboundedReceiver<StreamEvent>,
         mut writes: mpsc::UnboundedReceiver<Write>,
-        mut reads: mpsc::UnboundedReceiver<Read>,
         mut shutdown: oneshot::Receiver<()>,
-    ) {
-        tracing::debug!("uTP conn starting...");
+    ) -> io::Result<()> {
+        tracing::debug!("uTP conn starting... {:?}", self.peer);
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
         // then send the SYN-ACK.
@@ -194,7 +245,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             Endpoint::Initiator((syn_seq_num, ..)) => {
                 let syn = self.syn_packet(syn_seq_num);
                 self.socket_events
-                    .send(SocketEvent::Outgoing((syn.clone(), self.cid.peer.clone())))
+                    .send(SocketEvent::Outgoing((syn.clone(), self.peer.clone())))
                     .unwrap();
                 self.unacked
                     .insert_at(syn_seq_num, syn, self.config.initial_timeout);
@@ -204,7 +255,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             Endpoint::Acceptor((syn, syn_ack)) => {
                 let state = self.state_packet().unwrap();
                 self.socket_events
-                    .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
+                    .send(SocketEvent::Outgoing((state, self.peer.clone())))
                     .unwrap();
 
                 let recv_buf = ReceiveBuffer::new(syn);
@@ -230,10 +281,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     panic!("connection in invalid state prior to event loop beginning");
                 }
 
-                self.state = State::Established {
+                self.state = State::Connected {
                     recv_buf,
                     send_buf,
                     sent_packets,
+                    closing: None,
                 };
             }
         }
@@ -243,6 +295,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         tokio::pin!(idle_timeout);
         loop {
             tokio::select! {
+                biased;
                 Some(event) = stream_events.recv() => {
                     match event {
                         StreamEvent::Incoming(packet) => {
@@ -257,12 +310,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         }
                     }
                 }
-                Some(Ok(timeout)) = self.unacked.next() => {
-                    let (seq, packet) = timeout;
-                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
-
-                    self.on_timeout(packet, Instant::now());
-                }
                 Some(write) = writes.recv(), if !shutting_down => {
                     // Reset the idle timeout on any new write.
                     let idle_deadline = tokio::time::Instant::now() + self.config.max_idle_timeout;
@@ -270,20 +317,22 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
                     self.on_write(write);
                 }
-                Some(read) = reads.recv() => {
-                    self.on_read(read);
-                }
                 _ = self.readable.notified() => {
                     self.process_reads();
                 }
                 _ = self.writable.notified() => {
                     self.process_writes(Instant::now());
                 }
+                Some(Ok(timeout)) = self.unacked.next() => {
+                    let (seq, packet) = timeout;
+                    tracing::debug!(seq, ack = %packet.ack_num(), packet = ?packet.packet_type(), "timeout");
+
+                    self.on_timeout(packet, Instant::now());
+                }
                 () = &mut idle_timeout => {
                     if !std::matches!(self.state, State::Closed { .. }) {
                         let unacked: Vec<u16> = self.unacked.keys().copied().collect();
                         tracing::warn!(?unacked, "idle timeout expired, closing...");
-
                         self.state = State::Closed { err: Some(Error::TimedOut) };
                     }
                 }
@@ -299,18 +348,24 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
             if let State::Closed { err } = self.state {
                 tracing::debug!(?err, "uTP conn closing...");
-
                 self.process_reads();
                 self.process_writes(Instant::now());
 
-                if let Err(..) = self
+                if let Err(err) = self
                     .socket_events
                     .send(SocketEvent::Shutdown(self.cid.clone()))
                 {
-                    tracing::warn!("unable to send shutdown signal to uTP socket");
+                    tracing::error!(
+                        "unable to send shutdown signal to uTP socket: {}",
+                        err.to_string()
+                    );
                 }
 
-                break;
+                if let Some(err) = err {
+                    return Err(err.into());
+                } else {
+                    return Ok(());
+                }
             }
         }
     }
@@ -320,88 +375,86 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             State::Connecting(..) => {
                 self.state = State::Closed { err: None };
             }
-            State::Established {
+            State::Connected {
                 send_buf,
                 sent_packets,
                 recv_buf,
+                closing,
             } => {
-                let mut local_fin = None;
-                if self.pending_writes.is_empty() && send_buf.is_empty() {
-                    // TODO: Helper for construction of FIN.
-                    let recv_window = recv_buf.available() as u32;
-                    let seq_num = sent_packets.next_seq_num();
-                    let ack_num = recv_buf.ack_num();
-                    let selective_ack = recv_buf.selective_ack();
-                    let fin = PacketBuilder::new(
-                        PacketType::Fin,
-                        self.cid.send,
-                        crate::time::now_micros(),
-                        recv_window,
-                        seq_num,
-                    )
-                    .ack_num(ack_num)
-                    .selective_ack(selective_ack)
-                    .build();
+                match closing {
+                    Some(Closing { local_fin, .. }) => {
+                        // If we have not sent our FIN, and there are no pending writes, and there is no
+                        // pending data in the send buffer, then send our FIN. If there were still data to
+                        // send, then we would not know which sequence number to assign to our FIN.
+                        if local_fin.is_none()
+                            && self.pending_writes.is_empty()
+                            && send_buf.is_empty()
+                        {
+                            // TODO: Helper for construction of FIN.
+                            let recv_window = recv_buf.available() as u32;
+                            let seq_num = sent_packets.next_seq_num();
+                            let ack_num = recv_buf.ack_num();
+                            let selective_ack = recv_buf.selective_ack();
+                            let fin = PacketBuilder::new(
+                                PacketType::Fin,
+                                self.cid.send,
+                                crate::time::now_micros(),
+                                recv_window,
+                                seq_num,
+                            )
+                            .ack_num(ack_num)
+                            .selective_ack(selective_ack)
+                            .build();
 
-                    local_fin = Some(seq_num);
+                            *local_fin = Some(seq_num);
 
-                    tracing::debug!(seq = %seq_num, "transmitting FIN");
-                    Self::transmit(
-                        sent_packets,
-                        &mut self.unacked,
-                        &mut self.socket_events,
-                        fin,
-                        &self.cid.peer,
-                        Instant::now(),
-                    );
-                }
+                            tracing::debug!(seq = %seq_num, "transmitting FIN");
+                            Self::transmit(
+                                sent_packets,
+                                &mut self.unacked,
+                                &mut self.socket_events,
+                                fin,
+                                &self.peer,
+                                Instant::now(),
+                            );
+                        }
+                    }
+                    None => {
+                        let mut local_fin = None;
+                        if self.pending_writes.is_empty() && send_buf.is_empty() {
+                            // TODO: Helper for construction of FIN.
+                            let recv_window = recv_buf.available() as u32;
+                            let seq_num = sent_packets.next_seq_num();
+                            let ack_num = recv_buf.ack_num();
+                            let selective_ack = recv_buf.selective_ack();
+                            let fin = PacketBuilder::new(
+                                PacketType::Fin,
+                                self.cid.send,
+                                crate::time::now_micros(),
+                                recv_window,
+                                seq_num,
+                            )
+                            .ack_num(ack_num)
+                            .selective_ack(selective_ack)
+                            .build();
 
-                self.state = State::Closing {
-                    send_buf: send_buf.clone(),
-                    sent_packets: sent_packets.clone(),
-                    recv_buf: recv_buf.clone(),
-                    local_fin,
-                    remote_fin: None,
-                }
-            }
-            State::Closing {
-                send_buf,
-                sent_packets,
-                recv_buf,
-                local_fin,
-                ..
-            } => {
-                // If we have not sent our FIN, and there are no pending writes, and there is no
-                // pending data in the send buffer, then send our FIN. If there were still data to
-                // send, then we would not know which sequence number to assign to our FIN.
-                if local_fin.is_none() && self.pending_writes.is_empty() && send_buf.is_empty() {
-                    // TODO: Helper for construction of FIN.
-                    let recv_window = recv_buf.available() as u32;
-                    let seq_num = sent_packets.next_seq_num();
-                    let ack_num = recv_buf.ack_num();
-                    let selective_ack = recv_buf.selective_ack();
-                    let fin = PacketBuilder::new(
-                        PacketType::Fin,
-                        self.cid.send,
-                        crate::time::now_micros(),
-                        recv_window,
-                        seq_num,
-                    )
-                    .ack_num(ack_num)
-                    .selective_ack(selective_ack)
-                    .build();
+                            local_fin = Some(seq_num);
 
-                    *local_fin = Some(seq_num);
-
-                    tracing::debug!(seq = %seq_num, "transmitting FIN");
-                    Self::transmit(
-                        sent_packets,
-                        &mut self.unacked,
-                        &mut self.socket_events,
-                        fin,
-                        &self.cid.peer,
-                        Instant::now(),
-                    );
+                            tracing::debug!(seq = %seq_num, "transmitting FIN");
+                            Self::transmit(
+                                sent_packets,
+                                &mut self.unacked,
+                                &mut self.socket_events,
+                                fin,
+                                &self.peer,
+                                Instant::now(),
+                            );
+                        }
+                        *closing = Some(Closing {
+                            local_fin,
+                            remote_fin: None,
+                        });
+                    }
                 }
             }
             State::Closed { .. } => {}
@@ -411,13 +464,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     fn process_writes(&mut self, now: Instant) {
         let (send_buf, sent_packets, recv_buf) = match &mut self.state {
             State::Connecting(..) => return,
-            State::Established {
-                send_buf,
-                sent_packets,
-                recv_buf,
-                ..
-            } => (send_buf, sent_packets, recv_buf),
-            State::Closing {
+            State::Connected {
                 send_buf,
                 sent_packets,
                 recv_buf,
@@ -455,11 +502,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
 
         // Write as much data as possible into send buffer.
-        while let Some((data, ..)) = self.pending_writes.front() {
-            if data.len() <= send_buf.available() {
-                let (data, tx) = self.pending_writes.pop_front().unwrap();
-                send_buf.write(&data).unwrap();
-                let _ = tx.send(Ok(data.len()));
+        while self.pending_writes.front().is_some() {
+            let buf_space = send_buf.available();
+            if buf_space > 0 {
+                let (mut data, written, tx) = self.pending_writes.pop_front().unwrap();
+                if data.len() <= buf_space {
+                    send_buf.write(&data).unwrap();
+                    let _ = tx.send(Ok(data.len() + written));
+                } else {
+                    let next_write = data.drain(..buf_space);
+                    send_buf.write(next_write.as_slice()).unwrap();
+                    drop(next_write);
+                    // data was mutated by drain, so we only store the remaining data
+                    self.pending_writes
+                        .push_front((data, buf_space + written, tx));
+                }
                 self.writable.notify_one();
             } else {
                 break;
@@ -490,7 +547,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 &mut self.unacked,
                 &mut self.socket_events,
                 packet,
-                &self.cid.peer,
+                &self.peer,
                 now,
             );
             seq_num = seq_num.wrapping_add(1);
@@ -501,20 +558,25 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         let (data, tx) = write;
 
         match &mut self.state {
-            State::Connecting(..) | State::Established { .. } => {
-                self.pending_writes.push_back((data, tx));
+            State::Connecting(..) => {
+                // There are 0 bytes written so far
+                self.pending_writes.push_back((data, 0, tx));
             }
-            State::Closing {
-                local_fin,
-                remote_fin,
-                ..
-            } => {
-                if local_fin.is_none() && remote_fin.is_some() {
-                    self.pending_writes.push_back((data, tx));
-                } else {
-                    let _ = tx.send(Ok(0));
+            State::Connected { closing, .. } => match closing {
+                Some(Closing {
+                    local_fin,
+                    remote_fin,
+                }) => {
+                    if local_fin.is_none() && remote_fin.is_some() {
+                        self.pending_writes.push_back((data, 0, tx));
+                    } else {
+                        let _ = tx.send(Ok(0));
+                    }
                 }
-            }
+                None => {
+                    self.pending_writes.push_back((data, 0, tx));
+                }
+            },
             State::Closed { err, .. } => {
                 let result = match err {
                     Some(err) => Err(io::Error::from(io::ErrorKind::from(*err))),
@@ -532,70 +594,58 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     fn process_reads(&mut self) {
         let recv_buf = match &mut self.state {
             State::Connecting(..) => return,
-            State::Established { recv_buf, .. } | State::Closing { recv_buf, .. } => recv_buf,
+            State::Connected { recv_buf, .. } => recv_buf,
             State::Closed { err } => {
                 let result = match err {
-                    Some(err) => Err(io::ErrorKind::from(*err)),
+                    Some(err) => Err(io::ErrorKind::from(*err).into()),
                     None => Ok(vec![]),
                 };
-                while let Some(pending) = self.pending_reads.pop_front() {
-                    let (.., tx) = pending;
-                    let _ = tx.send(result.clone().map_err(io::Error::from));
+
+                if let Err(err) = self.reads.send(result) {
+                    tracing::warn!(
+                        "unable to push empty vector to read buffer: {}",
+                        err.to_string()
+                    );
                 }
                 return;
             }
         };
 
-        while let Some((len, ..)) = self.pending_reads.front() {
-            let mut buf = vec![0; *len];
+        while !recv_buf.is_empty() {
+            let mut buf = vec![0; self.config.max_packet_size as usize];
             let n = recv_buf.read(&mut buf).unwrap();
             if n == 0 {
                 break;
             } else {
-                let (.., tx) = self.pending_reads.pop_front().unwrap();
                 buf.truncate(n);
-                let _ = tx.send(Ok(buf));
+                if let Err(err) = self.reads.send(Ok(buf)) {
+                    tracing::warn!("unable to push data to read buffer: {}", err.to_string());
+                }
             }
         }
 
         // If we have reached EOF, then send an empty result to all pending reads.
         if self.eof() {
-            while let Some((.., tx)) = self.pending_reads.pop_front() {
-                let _ = tx.send(Ok(vec![]));
+            if let Err(err) = self.reads.send(Ok(vec![])) {
+                tracing::warn!(
+                    "unable to push empty vector at eof to read buffer: {}",
+                    err.to_string()
+                );
             }
         }
-    }
-
-    fn on_read(&mut self, read: Read) {
-        let (len, tx) = read;
-        match &mut self.state {
-            State::Connecting(..) | State::Established { .. } | State::Closing { .. } => {
-                self.pending_reads.push_back((len, tx))
-            }
-            State::Closed { err } => {
-                let result = match err {
-                    Some(err) => Err(io::Error::from(io::ErrorKind::from(*err))),
-                    None => Ok(vec![]),
-                };
-                let _ = tx.send(result);
-            }
-        }
-
-        self.process_reads();
-
-        self.readable.notify_waiters();
     }
 
     fn eof(&self) -> bool {
         match &self.state {
-            State::Connecting(..) | State::Established { .. } => false,
-            State::Closing {
-                recv_buf,
-                remote_fin,
-                ..
-            } => match remote_fin {
-                Some(fin) => recv_buf.ack_num() == *fin,
-                None => false,
+            State::Connecting(..) => false,
+            State::Connected {
+                recv_buf, closing, ..
+            } => match closing {
+                Some(Closing {
+                    local_fin: _,
+                    remote_fin: Some(fin),
+                }) => recv_buf.ack_num() == *fin,
+                _ => false,
             },
             State::Closed { .. } => true,
         }
@@ -606,6 +656,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             State::Connecting(connected) => match &mut self.endpoint {
                 Endpoint::Initiator((syn, attempts)) => {
                     if *attempts >= self.config.max_conn_attempts {
+                        tracing::error!("quitting connection attempt, after {} tries", *attempts);
                         let err = Error::TimedOut;
                         if let Some(connected) = connected.take() {
                             let err = io::Error::from(io::ErrorKind::from(err));
@@ -614,24 +665,32 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         self.state = State::Closed { err: Some(err) };
                     } else {
                         let seq = *syn;
+                        let log_msg = format!("retrying connection, after {} attempts", *attempts);
+                        match *attempts {
+                            1 => tracing::trace!(log_msg),
+                            2 => tracing::debug!(log_msg),
+                            3 => tracing::info!(log_msg),
+                            _ => tracing::warn!(log_msg),
+                        }
                         *attempts += 1;
+
+                        // Double previous timeout for exponential backoff on each attempt
+                        let timeout = self
+                            .config
+                            .initial_timeout
+                            .mul_f32((1.5_f32).powf(*attempts as f32));
+                        self.unacked.insert_at(seq, packet, timeout);
+
+                        // Re-send SYN packet.
                         let packet = self.syn_packet(seq);
-                        let _ = self.socket_events.send(SocketEvent::Outgoing((
-                            packet.clone(),
-                            self.cid.peer.clone(),
-                        )));
-                        self.unacked
-                            .insert_at(seq, packet, self.config.initial_timeout);
+                        let _ = self
+                            .socket_events
+                            .send(SocketEvent::Outgoing((packet, self.peer.clone())));
                     }
                 }
                 Endpoint::Acceptor(..) => {}
             },
-            State::Established {
-                sent_packets,
-                recv_buf,
-                ..
-            }
-            | State::Closing {
+            State::Connected {
                 sent_packets,
                 recv_buf,
                 ..
@@ -642,7 +701,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     return;
                 }
 
-                sent_packets.on_timeout();
+                // To prevent timeout amplification in the event that a batch of packets sent near
+                // the same time all timeout, we only register a new timeout if the time elapsed
+                // since the latest timeout is greater than the existing timeout.
+                //
+                // For example, if the current congestion control timeout is 1s, then we only
+                // register a new timeout if the time elapsed since the latest registered timeout
+                // is greater than 1s.
+                let timeout = match self.latest_timeout {
+                    Some(latest) => latest.elapsed() > sent_packets.timeout(),
+                    None => true,
+                };
+                if timeout {
+                    sent_packets.on_timeout();
+                    self.latest_timeout = Some(Instant::now());
+                }
 
                 // TODO: Limit number of retransmissions.
                 let recv_window = recv_buf.available() as u32;
@@ -660,7 +733,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     &mut self.unacked,
                     &mut self.socket_events,
                     packet,
-                    &self.cid.peer,
+                    &self.peer,
                     now,
                 );
             }
@@ -669,10 +742,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     }
 
     fn on_packet(&mut self, packet: &Packet, now: Instant) {
+        tracing::trace!("Received {:?}", packet);
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
-        // Cap the diff. If the clock on the remote machine is behind the clock on the local
+        // Cap the diff. If the clock on the remote machine is ahead of the clock on the local
         // machine, then we could end up with large (inaccurate) diffs. Use the max idle timeout as
         // an upper bound on the possible diff. If the diff exceeds the bound, then assume the
         // remote clock is behind the local clock and use a diff of 1s.
@@ -685,26 +759,22 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
-            PacketType::State => {
-                let delay = Duration::from_micros(packet.ts_diff_micros().into());
-                self.on_state(
-                    packet.seq_num(),
-                    packet.ack_num(),
-                    packet.selective_ack(),
-                    delay,
-                    now,
-                );
-            }
+            PacketType::State => self.on_state(packet.seq_num(), packet.ack_num()),
             PacketType::Data => self.on_data(packet.seq_num(), packet.payload()),
-            PacketType::Fin => {
-                if packet.payload().is_empty() {
-                    self.on_fin(packet.seq_num(), None);
-                } else {
-                    self.on_fin(packet.seq_num(), Some(packet.payload()));
+            PacketType::Fin => self.on_fin(packet.seq_num(), packet.payload()),
+            PacketType::Reset => self.on_reset(),
+        }
+
+        // Mark sent packets as acked, using the received ack_num
+        match packet.packet_type() {
+            PacketType::Syn | PacketType::Reset => {}
+            PacketType::State | PacketType::Data | PacketType::Fin => {
+                let delay = Duration::from_micros(packet.ts_diff_micros().into());
+                if let Err(err) =
+                    self.process_ack(packet.ack_num(), packet.selective_ack(), delay, now)
+                {
+                    tracing::warn!(%err, ?packet, "ack does not correspond to known seq_num");
                 }
-            }
-            PacketType::Reset => {
-                self.on_reset();
             }
         }
 
@@ -719,9 +789,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         match packet.packet_type() {
             PacketType::Syn | PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
-                    self.socket_events
-                        .send(SocketEvent::Outgoing((state, self.cid.peer.clone())))
-                        .expect("outgoing channel should be open if connection is not closed");
+                    let event = SocketEvent::Outgoing((state, self.peer.clone()));
+                    if self.socket_events.send(event).is_err() {
+                        tracing::warn!("Cannot transmit state packet: socket closed channel");
+                        return;
+                    }
                 }
             }
             PacketType::State | PacketType::Reset => {}
@@ -739,19 +811,85 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             self.readable.notify_one();
         }
 
-        // If both endpoints have exchanged FINs and all data has been received/acknowledged, then
-        // close the connection.
-        if let State::Closing {
-            local_fin: Some(..),
-            remote_fin: Some(remote),
+        // One-way Fin: Case 1 - We have sent our data and then our fin. If this fin is acked, then the receiver got all our data and we close
+        if let State::Connected {
+            closing:
+                Some(Closing {
+                    local_fin: Some(local),
+                    remote_fin: _,
+                }),
+            sent_packets,
+            ..
+        } = &mut self.state
+        {
+            if sent_packets.last_ack_num().is_some()
+                && sent_packets.last_ack_num().unwrap() == *local
+            {
+                self.state = State::Closed { err: None };
+            }
+        }
+
+        // One-way Fin: Case 2 - We have received data and then the fin. We sent an ack, so close the connection
+        if let State::Connected {
+            closing:
+                Some(Closing {
+                    local_fin: _,
+                    remote_fin: Some(remote),
+                }),
             sent_packets,
             recv_buf,
             ..
         } = &mut self.state
         {
             if !sent_packets.has_unacked_packets() && recv_buf.ack_num() == *remote {
+                // flush recv_buf before closing the connection
+                self.process_reads();
                 self.state = State::Closed { err: None };
             }
+        }
+
+        // One-way Fin: Case 3 - We sent our Fin, but for some reason they sent us a Fin after that and it didn't ack our Fin
+        // We will close the connection and assume they got all of our data and tried to prematurely close the connection as an optimization
+        if let State::Connected {
+            closing:
+                Some(Closing {
+                    local_fin: Some(_),
+                    remote_fin: Some(_),
+                }),
+            ..
+        } = &mut self.state
+        {
+            self.state = State::Closed { err: None };
+        }
+    }
+
+    fn process_ack(
+        &mut self,
+        ack_num: u16,
+        selective_ack: Option<&SelectiveAck>,
+        delay: Duration,
+        now: Instant,
+    ) -> Result<(), Error> {
+        match &mut self.state {
+            State::Connected { sent_packets, .. } => {
+                match sent_packets.on_ack(ack_num, selective_ack, delay, now) {
+                    Ok((full_acked, selected_acks)) => {
+                        self.unacked.retain(|seq, _| !full_acked.contains(*seq));
+                        for seq_num in selected_acks {
+                            self.unacked.remove(&seq_num);
+                        }
+                        Ok(())
+                    }
+                    Err(err) => match err {
+                        SentPacketsError::InvalidAckNum => {
+                            let err = Error::InvalidAckNum;
+                            self.reset(err);
+                            Err(err)
+                        }
+                    },
+                }
+            }
+            State::Connecting(..) | State::Closed { .. } => Ok(()),
         }
     }
 
@@ -777,14 +915,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
     }
 
-    fn on_state(
-        &mut self,
-        seq_num: u16,
-        ack_num: u16,
-        selective_ack: Option<&SelectiveAck>,
-        delay: Duration,
-        now: Instant,
-    ) {
+    fn on_state(&mut self, seq_num: u16, ack_num: u16) {
         match &mut self.state {
             State::Connecting(connected) => match self.endpoint {
                 // If the STATE acknowledges our SYN, then mark the connection established.
@@ -801,42 +932,17 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         let sent_packets = SentPackets::new(syn, congestion_ctrl);
 
                         let _ = connected.take().unwrap().send(Ok(()));
-                        self.state = State::Established {
+                        self.state = State::Connected {
                             recv_buf,
                             send_buf,
                             sent_packets,
+                            closing: None,
                         };
                     }
                 }
                 Endpoint::Acceptor(..) => {}
             },
-            State::Established { sent_packets, .. } | State::Closing { sent_packets, .. } => {
-                let range = sent_packets.seq_num_range();
-                if range.contains(ack_num) {
-                    // Do not ACK if ACK num corresponds to initial packet.
-                    if ack_num != range.start() {
-                        sent_packets.on_ack(ack_num, selective_ack, delay, now);
-                    }
-
-                    // Mark all packets up to `ack_num` acknowledged by retaining all packets in
-                    // the range beyond `ack_num`.
-                    let acked = CircularRangeInclusive::new(range.start(), ack_num);
-                    self.unacked.retain(|seq, _| !acked.contains(*seq));
-
-                    // TODO: Helper for selective ACK.
-                    if let Some(selective_ack) = selective_ack {
-                        for (i, acked) in selective_ack.acked().iter().enumerate() {
-                            let seq_num = usize::from(ack_num).wrapping_add(2 + i) as u16;
-                            if *acked {
-                                self.unacked.remove(&seq_num);
-                            }
-                        }
-                    }
-                } else {
-                    self.reset(Error::InvalidAckNum);
-                }
-            }
-            State::Closed { .. } => {}
+            State::Connected { .. } | State::Closed { .. } => {}
         }
     }
 
@@ -861,33 +967,38 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 // connection being established.
                 Endpoint::Initiator(..) => {}
             },
-            // If the connection is established, and there is sufficient capacity, then incorporate
-            // the data into the receive buffer.
-            State::Established { recv_buf, .. } => {
-                if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
-                    recv_buf.write(data, seq_num);
-                }
-            }
-            // If the connection is closing and we have a remote FIN, then check whether the
-            // sequence number falls within the appropriate range. If it does, and there is
-            // sufficient capacity, then incorporate the data into the receive buffer. If it does
-            // not, then reset the connection.
-            State::Closing {
-                recv_buf,
-                remote_fin,
-                ..
+            State::Connected {
+                recv_buf, closing, ..
             } => {
-                if let Some(remote_fin) = remote_fin {
-                    let start = recv_buf.init_seq_num();
-                    let range = crate::seq::CircularRangeInclusive::new(start, *remote_fin);
-                    if !range.contains(seq_num) {
-                        self.state = State::Closed {
-                            err: Some(Error::InvalidSeqNum),
-                        };
-                        return;
+                match closing {
+                    // If the connection is closing and we have a remote FIN, then check whether the
+                    // sequence number falls within the appropriate range. If it does, and there is
+                    // sufficient capacity, then incorporate the data into the receive buffer. If it does
+                    // not, then reset the connection.
+                    Some(Closing { remote_fin, .. }) => {
+                        if let Some(remote_fin) = remote_fin {
+                            let start = recv_buf.init_seq_num();
+                            let range = crate::seq::CircularRangeInclusive::new(start, *remote_fin);
+                            if !range.contains(seq_num) {
+                                self.state = State::Closed {
+                                    err: Some(Error::InvalidSeqNum),
+                                };
+                                return;
+                            }
+                        }
+
+                        if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
+                            recv_buf.write(data, seq_num);
+                        }
+                    }
+                    // If the connection is established, and there is sufficient capacity, then incorporate
+                    // the data into the receive buffer.
+                    None => {
+                        if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
+                            recv_buf.write(data, seq_num);
+                        }
                     }
                 }
-
                 if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
                     recv_buf.write(data, seq_num);
                 }
@@ -896,53 +1007,40 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         }
     }
 
-    fn on_fin(&mut self, seq_num: u16, data: Option<&[u8]>) {
+    fn on_fin(&mut self, seq_num: u16, data: &[u8]) {
         match &mut self.state {
             State::Connecting(..) => {}
-            State::Established {
-                recv_buf,
-                sent_packets,
-                send_buf,
+            State::Connected {
+                recv_buf, closing, ..
             } => {
-                // Register the FIN with the receive buffer.
-                if let Some(data) = data {
-                    recv_buf.write(data, seq_num);
-                } else {
-                    recv_buf.write(&[], seq_num);
-                }
+                match closing {
+                    Some(Closing { remote_fin, .. }) => {
+                        match remote_fin {
+                            // If we have already received a FIN, a subsequent FIN with a different
+                            // sequence number is incorrect behavior.
+                            Some(fin) => {
+                                if seq_num != *fin {
+                                    self.reset(Error::InvalidFin);
+                                }
+                            }
+                            None => {
+                                tracing::debug!(seq = %seq_num, "received FIN");
 
-                tracing::debug!(seq = %seq_num, "received FIN");
-
-                self.state = State::Closing {
-                    recv_buf: recv_buf.clone(),
-                    send_buf: send_buf.clone(),
-                    sent_packets: sent_packets.clone(),
-                    remote_fin: Some(seq_num),
-                    local_fin: None,
-                };
-            }
-            State::Closing {
-                recv_buf,
-                remote_fin,
-                ..
-            } => {
-                match remote_fin {
-                    // If we have already received a FIN, a subsequent FIN with a different
-                    // sequence number is incorrect behavior.
-                    Some(fin) => {
-                        if seq_num != *fin {
-                            self.reset(Error::InvalidFin);
+                                *remote_fin = Some(seq_num);
+                                recv_buf.write(data, seq_num);
+                            }
                         }
                     }
                     None => {
+                        // Register the FIN with the receive buffer.
+                        recv_buf.write(data, seq_num);
+
                         tracing::debug!(seq = %seq_num, "received FIN");
 
-                        *remote_fin = Some(seq_num);
-                        if let Some(data) = data {
-                            recv_buf.write(data, seq_num);
-                        } else {
-                            recv_buf.write(&[], seq_num);
-                        }
+                        *closing = Some(Closing {
+                            local_fin: None,
+                            remote_fin: Some(seq_num),
+                        });
                     }
                 }
             }
@@ -961,6 +1059,18 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
 
     fn reset(&mut self, err: Error) {
         tracing::warn!(?err, "resetting connection: {err}");
+        // If we already sent our fin and got a reset we assume the receiver already got our fin and has successfully closed their connection.
+        // hence mark this as a successful close.
+        if let State::Connected {
+            closing: Some(Closing {
+                local_fin: Some(_), ..
+            }),
+            ..
+        } = self.state
+        {
+            self.state = State::Closed { err: None };
+            return;
+        }
         self.state = State::Closed { err: Some(err) }
     }
 
@@ -993,12 +1103,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                     Some(packet)
                 }
             },
-            State::Established {
-                recv_buf,
-                sent_packets,
-                ..
-            }
-            | State::Closing {
+            State::Connected {
                 recv_buf,
                 sent_packets,
                 ..
@@ -1024,12 +1129,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
     fn retransmit_lost_packets(&mut self, now: Instant) {
         let (sent_packets, recv_buf) = match &mut self.state {
             State::Connecting(..) | State::Closed { .. } => return,
-            State::Established {
-                sent_packets,
-                recv_buf,
-                ..
-            }
-            | State::Closing {
+            State::Connected {
                 sent_packets,
                 recv_buf,
                 ..
@@ -1061,7 +1161,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 &mut self.unacked,
                 &mut self.socket_events,
                 packet,
-                &self.cid.peer,
+                &self.peer,
                 now,
             );
         }
@@ -1072,7 +1172,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         unacked: &mut HashMapDelay<u16, Packet>,
         socket_events: &mut mpsc::UnboundedSender<SocketEvent<P>>,
         packet: Packet,
-        dest: &P,
+        peer: &Peer<P>,
         now: Instant,
     ) {
         let (payload, len) = if packet.payload().is_empty() {
@@ -1083,12 +1183,21 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                 packet.payload().len() as u32,
             )
         };
+        tracing::trace!(
+            "Write data cid={} packetType={} pkSeqNr={} pkAckNr={} length={}",
+            packet.conn_id(),
+            packet.packet_type(),
+            packet.seq_num(),
+            packet.ack_num(),
+            packet.encoded_len()
+        );
 
         sent_packets.on_transmit(packet.seq_num(), packet.packet_type(), payload, len, now);
         unacked.insert_at(packet.seq_num(), packet.clone(), sent_packets.timeout());
-        socket_events
-            .send(SocketEvent::Outgoing((packet, dest.clone())))
-            .expect("outgoing channel should be open if connection is not closed");
+        let outbound = SocketEvent::Outgoing((packet, peer.clone()));
+        if socket_events.send(outbound).is_err() {
+            tracing::warn!("Cannot transmit packet: socket closed channel");
+        }
     }
 }
 
@@ -1104,27 +1213,30 @@ mod test {
     fn conn(endpoint: Endpoint) -> Connection<BUF, SocketAddr> {
         let (connected, _) = oneshot::channel();
         let (socket_events, _) = mpsc::unbounded_channel();
+        let (reads_tx, _) = mpsc::unbounded_channel();
 
         let peer = SocketAddr::from(([127, 0, 0, 1], 3400));
         let cid = ConnectionId {
             send: 101,
             recv: 100,
-            peer,
+            peer_id: peer,
         };
 
         Connection {
             state: State::Connecting(Some(connected)),
             cid,
+            peer: Peer::new(peer),
             config: ConnectionConfig::default(),
             endpoint,
             peer_ts_diff: Duration::from_millis(100),
             peer_recv_window: u32::MAX,
             socket_events,
             unacked: HashMapDelay::new(DELAY),
-            pending_reads: VecDeque::new(),
+            reads: reads_tx,
             readable: Notify::new(),
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
+            latest_timeout: None,
         }
     }
 
@@ -1178,14 +1290,17 @@ mod test {
         let mut conn = conn(endpoint);
 
         let seq_num = 1;
-        let now = Instant::now();
-        conn.on_state(seq_num, syn, None, DELAY, now);
+        conn.on_state(seq_num, syn);
 
-        assert!(std::matches!(conn.state, State::Established { .. }));
+        assert!(std::matches!(
+            conn.state,
+            State::Connected { closing: None, .. }
+        ));
     }
 
     #[test]
-    fn on_state_established_invalid_ack_num() {
+    /// If a received ack_num is not a known sequence number, then reset the connection.
+    fn on_packet_invalid_ack_num() {
         let syn = 100;
         let syn_ack = 101;
         let endpoint = Endpoint::Acceptor((syn, syn_ack));
@@ -1208,20 +1323,16 @@ mod test {
         let send_buf = SendBuffer::new();
         let recv_buf = ReceiveBuffer::new(syn);
 
-        conn.state = State::Established {
+        conn.state = State::Connected {
             sent_packets,
             send_buf,
             recv_buf,
+            closing: None,
         };
 
-        let now = Instant::now();
-        conn.on_state(
-            syn.wrapping_add(1),
-            syn_ack.wrapping_add(2),
-            None,
-            DELAY,
-            now,
-        );
+        // Dummy delay, value is irrelevant
+        let delay = Duration::from_millis(100);
+        let ack_result = conn.process_ack(syn_ack.wrapping_add(2), None, delay, now);
 
         assert!(std::matches!(
             conn.state,
@@ -1229,6 +1340,10 @@ mod test {
                 err: Some(Error::InvalidAckNum),
             }
         ));
+        assert! {
+            ack_result.is_err(),
+            "Expected received_ack to return an error"
+        };
     }
 
     #[test]
@@ -1243,18 +1358,22 @@ mod test {
         let sent_packets = SentPackets::new(syn_ack, congestion_ctrl);
         let recv_buf = ReceiveBuffer::new(syn);
 
-        conn.state = State::Established {
+        conn.state = State::Connected {
             send_buf,
             sent_packets,
             recv_buf,
+            closing: None,
         };
 
         let fin = syn.wrapping_add(3);
-        conn.on_fin(fin, None);
+        conn.on_fin(fin, &[]);
         match conn.state {
-            State::Closing {
-                local_fin,
-                remote_fin,
+            State::Connected {
+                closing:
+                    Some(Closing {
+                        local_fin,
+                        remote_fin,
+                    }),
                 ..
             } => {
                 assert!(local_fin.is_none());
@@ -1277,20 +1396,25 @@ mod test {
         let recv_buf = ReceiveBuffer::new(syn);
 
         let local_fin = syn_ack.wrapping_add(3);
-        conn.state = State::Closing {
+        conn.state = State::Connected {
             send_buf,
             sent_packets,
             recv_buf,
-            local_fin: Some(local_fin),
-            remote_fin: None,
+            closing: Some(Closing {
+                local_fin: Some(local_fin),
+                remote_fin: None,
+            }),
         };
 
         let remote_fin = syn.wrapping_add(3);
-        conn.on_fin(remote_fin, None);
+        conn.on_fin(remote_fin, &[]);
         match conn.state {
-            State::Closing {
-                local_fin: local,
-                remote_fin: remote,
+            State::Connected {
+                closing:
+                    Some(Closing {
+                        local_fin: local,
+                        remote_fin: remote,
+                    }),
                 ..
             } => {
                 assert_eq!(local, Some(local_fin));
@@ -1313,16 +1437,18 @@ mod test {
         let recv_buf = ReceiveBuffer::new(syn);
 
         let fin = syn.wrapping_add(3);
-        conn.state = State::Closing {
+        conn.state = State::Connected {
             send_buf,
             sent_packets,
             recv_buf,
-            remote_fin: Some(fin),
-            local_fin: None,
+            closing: Some(Closing {
+                local_fin: None,
+                remote_fin: Some(fin),
+            }),
         };
 
         let alt_fin = fin.wrapping_add(1);
-        conn.on_fin(alt_fin, None);
+        conn.on_fin(alt_fin, &[]);
         assert!(std::matches!(
             conn.state,
             State::Closed {
@@ -1356,5 +1482,56 @@ mod test {
 
         conn.on_reset();
         assert!(std::matches!(conn.state, State::Closed { err: None }));
+    }
+
+    #[test]
+    fn state_debug_format() {
+        // Test that the state enum can be formatted with debug formatting.
+
+        // Test Connecting
+        let state: State<BUF> = State::Connecting(None);
+        let expected_format = "State::Connecting";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Established
+        let state: State<BUF> = State::Connected {
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+            closing: None,
+        };
+        let expected_format = "State::Connected: Established state";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closing
+        let state: State<BUF> = State::Connected {
+            closing: Some(Closing {
+                local_fin: Some(12),
+                remote_fin: Some(34),
+            }),
+            sent_packets: SentPackets::new(
+                0,
+                congestion::Controller::new(congestion::Config::default()),
+            ),
+            send_buf: SendBuffer::new(),
+            recv_buf: ReceiveBuffer::new(0),
+        };
+        let expected_format =
+            "State::Connected: in Closing state { local_fin: Some(12), remote_fin: Some(34) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
+
+        // Test Closed
+        let state: State<BUF> = State::Closed {
+            err: Some(Error::Reset),
+        };
+        let expected_format = "State::Closed { err: Some(Reset) }";
+        let actual_format = format!("{:?}", state);
+        assert_eq!(actual_format, expected_format);
     }
 }

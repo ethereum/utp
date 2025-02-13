@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::{self, Formatter};
 use std::time::{Duration, Instant};
 
 use crate::congestion;
@@ -34,6 +35,21 @@ pub struct SentPackets {
     lost_packets: BTreeSet<u16>,
     congestion_ctrl: congestion::Controller,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SentPacketsError {
+    InvalidAckNum,
+}
+
+impl fmt::Display for SentPacketsError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAckNum => write!(f, "invalid ack number"),
+        }
+    }
+}
+
+impl std::error::Error for SentPacketsError {}
 
 impl SentPackets {
     /// Note: `seq_num` corresponds to the sequence number just before the sequence number of
@@ -157,10 +173,49 @@ impl SentPackets {
         self.inc_seq_num();
     }
 
+    /// Handle an ACK for a packet with sequence number `ack_num`, and an optional selective_ack.
+    ///
+    /// Returns Error, if `ack_num` is not within the sequence number range of the sent packets.
+    pub fn on_ack(
+        &mut self,
+        ack_num: u16,
+        selective_ack: Option<&SelectiveAck>,
+        delay: Duration,
+        now: Instant,
+    ) -> Result<(CircularRangeInclusive, Vec<u16>), SentPacketsError> {
+        let range = self.seq_num_range();
+        if !range.contains(ack_num) {
+            return Err(SentPacketsError::InvalidAckNum);
+        }
+
+        // Do not ACK if ACK num corresponds to initial packet.
+        if ack_num != range.start() {
+            self.on_ack_num(ack_num, selective_ack, delay, now);
+        }
+
+        // Mark all packets up to `ack_num` acknowledged by retaining all packets in
+        // the range beyond `ack_num`.
+        let full_acked = CircularRangeInclusive::new(range.start(), ack_num);
+
+        let selected_acks = if let Some(selective_ack) = selective_ack {
+            selective_ack
+                .acked()
+                .iter()
+                .enumerate()
+                .filter(|(_, &acked)| acked)
+                .map(|(i, _)| ack_num.wrapping_add(2).wrapping_add(i as u16))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok((full_acked, selected_acks))
+    }
+
     /// # Panics
     ///
     /// Panics if `ack_num` does not correspond to a previously sent packet.
-    pub fn on_ack(
+    fn on_ack_num(
         &mut self,
         ack_num: u16,
         selective_ack: Option<&SelectiveAck>,
@@ -316,7 +371,7 @@ impl SentPackets {
     ///
     /// Returns `None` if none of the (possibly zero) packets have been acknowledged.
     // TODO: Cache this value, (possibly) updating on each ACK.
-    fn last_ack_num(&self) -> Option<u16> {
+    pub fn last_ack_num(&self) -> Option<u16> {
         if self.packets.is_empty() {
             return None;
         }
@@ -498,12 +553,14 @@ mod test {
         let selective_ack = SelectiveAck::new(acked);
 
         let now = Instant::now();
-        sent_packets.on_ack(
-            init_seq_num.wrapping_add(1),
-            Some(&selective_ack),
-            DELAY,
-            now,
-        );
+        sent_packets
+            .on_ack(
+                init_seq_num.wrapping_add(1),
+                Some(&selective_ack),
+                DELAY,
+                now,
+            )
+            .unwrap();
         assert_eq!(
             sent_packets
                 .packets
