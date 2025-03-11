@@ -377,8 +377,8 @@ where
                 tracing::error!(%err, "failed to open connection with {cid:?}");
                 Err(err)
             }
-            Err(_) => {
-                tracing::error!("failed to open connection with {cid:?}");
+            Err(err) => {
+                tracing::error!(%err, "failed to open connection with {cid:?}");
                 Err(io::Error::from(io::ErrorKind::TimedOut))
             }
         }
