@@ -11,15 +11,25 @@ use utp_rs::conn::ConnectionConfig;
 use utp_rs::socket::UtpSocket;
 
 const TEST_DATA: &[u8] = &[0xf0; 1_000_000];
+const HUGE_TEST_DATA: &[u8] = &[0xf0; 100_000_000];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn many_concurrent_transfers() {
+    concurrent_transfers(1000, TEST_DATA, 3400).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn huge_concurrent_transfers() {
+    concurrent_transfers(10, HUGE_TEST_DATA, 3406).await;
+}
+
+async fn concurrent_transfers(num_transfers: u16, data: &'static [u8], port: u16) {
     let _ = tracing_subscriber::fmt::try_init();
 
     tracing::info!("starting socket test");
 
-    let recv_addr = SocketAddr::from(([127, 0, 0, 1], 3400));
-    let send_addr = SocketAddr::from(([127, 0, 0, 1], 3401));
+    let recv_addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let send_addr = SocketAddr::from(([127, 0, 0, 1], port + 1));
 
     let recv = UtpSocket::bind(recv_addr).await.unwrap();
     let recv = Arc::new(recv);
@@ -28,7 +38,6 @@ async fn many_concurrent_transfers() {
     let mut handles = FuturesUnordered::new();
 
     let start = Instant::now();
-    let num_transfers = 1000;
     for i in 0..num_transfers {
         // step up cid by two to avoid collisions
         let handle = initiate_transfer(
@@ -37,7 +46,7 @@ async fn many_concurrent_transfers() {
             recv.clone(),
             send_addr,
             send.clone(),
-            TEST_DATA,
+            data,
         )
         .await;
         handles.push(handle.0);
@@ -48,7 +57,7 @@ async fn many_concurrent_transfers() {
         res.unwrap();
     }
     let elapsed = Instant::now() - start;
-    let megabits_sent = num_transfers as f64 * TEST_DATA.len() as f64 * 8.0 / 1_000_000.0;
+    let megabits_sent = num_transfers as f64 * data.len() as f64 * 8.0 / 1_000_000.0;
     let transfer_rate = megabits_sent / elapsed.as_secs_f64();
     tracing::info!("finished high concurrency load test of {} simultaneous transfers, in {:?}, at a rate of {:.0} Mbps", num_transfers, elapsed, transfer_rate);
 }
