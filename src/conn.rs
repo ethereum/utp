@@ -999,9 +999,6 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
                         }
                     }
                 }
-                if data.len() <= recv_buf.available() && !recv_buf.was_written(seq_num) {
-                    recv_buf.write(data, seq_num);
-                }
             }
             State::Closed { .. } => {}
         }
