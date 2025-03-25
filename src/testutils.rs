@@ -47,6 +47,31 @@ impl LinkDecider for ManualLinkDecider {
     }
 }
 
+pub struct LinkDropsFirstNSent {
+    target_drops: usize,
+    actual_drops: usize,
+}
+
+impl LinkDropsFirstNSent {
+    fn new(n: usize) -> Self {
+        Self {
+            target_drops: n,
+            actual_drops: 0,
+        }
+    }
+}
+
+impl LinkDecider for LinkDropsFirstNSent {
+    fn should_send(&mut self) -> bool {
+        if self.actual_drops < self.target_drops {
+            self.actual_drops += 1;
+            false
+        } else {
+            true
+        }
+    }
+}
+
 #[async_trait]
 impl<Link: LinkDecider + std::marker::Sync + std::marker::Send> AsyncUdpSocket<char>
     for MockUdpSocket<Link>
@@ -159,6 +184,24 @@ pub fn build_manually_linked_pair() -> (
     (MockUdpSocket<ManualLinkDecider>, ConnectionId<char>),
 ) {
     let (socket_a, socket_b) = build_link_pair(ManualLinkDecider::new(), ManualLinkDecider::new());
+    let (a_cid, b_cid) = build_connection_id_pair(&socket_a, &socket_b);
+    ((socket_a, a_cid), (socket_b, b_cid))
+}
+
+/// Build a link between sockets, where the first n packets sent by the 2nd socket are dropped.
+///
+/// The first socket is the one with the lower connection ID, which must be the one initiating the
+/// connection.
+#[allow(clippy::type_complexity)]
+pub fn build_link_drops_first_n_sent_pair(
+    n: usize,
+) -> (
+    (MockUdpSocket<ManualLinkDecider>, ConnectionId<char>),
+    (MockUdpSocket<LinkDropsFirstNSent>, ConnectionId<char>),
+) {
+    let link_a_to_b = ManualLinkDecider::new();
+    let link_b_to_a = LinkDropsFirstNSent::new(n);
+    let (socket_a, socket_b) = build_link_pair(link_a_to_b, link_b_to_a);
     let (a_cid, b_cid) = build_connection_id_pair(&socket_a, &socket_b);
     ((socket_a, a_cid), (socket_b, b_cid))
 }
