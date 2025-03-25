@@ -184,6 +184,11 @@ pub struct Connection<const N: usize, P: ConnectionPeer> {
     pending_writes: VecDeque<QueuedWrite>,
     writable: Notify,
     latest_timeout: Option<Instant>,
+    /// Save the first STATE packet returned to an incoming connection request.
+    /// We resend the exact packet in case the first response to the SYN packet is lost,
+    /// because regenerating the STATE packet gives us the wrong sequence number, and causes the
+    /// connecting peer to ignore earlier data sent to them.
+    syn_state: Option<Packet>,
 }
 
 impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
@@ -228,6 +233,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
             latest_timeout: None,
+            syn_state: None,
         }
     }
 
@@ -240,7 +246,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         tracing::debug!("uTP conn starting... {:?}", self.peer);
 
         // If we are the initiating endpoint, then send the SYN. If we are the accepting endpoint,
-        // then send the SYN-ACK.
+        // then send the STATE in response to the SYN.
         match self.endpoint {
             Endpoint::Initiator((syn_seq_num, ..)) => {
                 let syn = self.syn_packet(syn_seq_num);
@@ -254,6 +260,7 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
             }
             Endpoint::Acceptor((syn, syn_ack)) => {
                 let state = self.state_packet().unwrap();
+                self.syn_state = Some(state.clone());
                 self.socket_events
                     .send(SocketEvent::Outgoing((state, self.peer.clone())))
                     .unwrap();
@@ -787,7 +794,29 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         // NOTE: We should probably move this so that multiple incoming packets can be processed
         // before we send a STATE.
         match packet.packet_type() {
-            PacketType::Syn | PacketType::Fin | PacketType::Data => {
+            PacketType::Syn => {
+                if self.syn_state.is_none() {
+                    if let Some(state) = self.state_packet() {
+                        tracing::warn!("Oddly missing SYN STATE, some risk to data validity");
+                        // The syn_state is generated at the beginning of the event_loop, so should
+                        // not be None here. So regenerating the STATE packet is a defensive
+                        // measure to keep working anyway, rather than ignore repeated SYN packets.
+                        // Regenerating runs the risk of causing the remote peer to ignore earlier
+                        // data sent to them, because the generated sequence number will be higher
+                        // than any previously sent data, which causes the remote peer to ignore
+                        // it silently, but think it received all the data.
+                        self.syn_state = Some(state);
+                    }
+                }
+                if let Some(state) = &self.syn_state {
+                    let event = SocketEvent::Outgoing((state.clone(), self.peer.clone()));
+                    if self.socket_events.send(event).is_err() {
+                        tracing::warn!("Cannot re-transmit syn ack packet: socket closed channel");
+                        return;
+                    }
+                }
+            }
+            PacketType::Fin | PacketType::Data => {
                 if let Some(state) = self.state_packet() {
                     let event = SocketEvent::Outgoing((state, self.peer.clone()));
                     if self.socket_events.send(event).is_err() {
@@ -1237,6 +1266,7 @@ mod test {
             pending_writes: VecDeque::new(),
             writable: Notify::new(),
             latest_timeout: None,
+            syn_state: None,
         }
     }
 

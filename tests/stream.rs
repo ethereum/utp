@@ -266,3 +266,90 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
         }
     };
 }
+
+// Test that data is delivered successfully, even if the original SYN-STATE is dropped
+//
+// At the time of writing, a bug in this scenario causes the first bytes (2048 of them) to be
+// silently lost. The recipient thinks it received everything, but is missing the first bytes of
+// the transfer. When the recipient, who started the connection, times out the original SYN, it
+// resends. The sender has already sent some data. When the bug is active, the resent STATE
+// packet in response to the SYN uses the sequence number after incrementing from the previously
+// sent state data. This causes the recipient to ignore all data sent previously.
+#[tokio::test(start_paused = true)]
+async fn test_data_valid_when_resending_syn_state_response() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let conn_config = ConnectionConfig::default();
+
+    let ((connector_socket, connector_cid), (acceptor_socket, acceptor_cid)) =
+        testutils::build_link_drops_first_n_sent_pair(1);
+
+    let acceptor = UtpSocket::with_socket(acceptor_socket);
+    let acceptor = Arc::new(acceptor);
+
+    let connector = UtpSocket::with_socket(connector_socket);
+    let connector = Arc::new(connector);
+
+    // It's important for this scenario that the data recipient is the one creating the connection.
+    let acceptor_one = Arc::clone(&acceptor);
+    let acceptor_one_handle = tokio::spawn(async move {
+        acceptor_one
+            .accept_with_cid(
+                acceptor_cid,
+                Peer::new_id(acceptor_cid.peer_id),
+                conn_config,
+            )
+            .await
+            .unwrap()
+    });
+
+    // Keep a clone of the socket so that it doesn't drop when moved into the task.
+    // Dropping it causes all connections to exit.
+    let connector_one = Arc::clone(&connector);
+    let connector_one_handle = tokio::spawn(async move {
+        connector_one
+            .connect_with_cid(
+                connector_cid,
+                Peer::new_id(connector_cid.peer_id),
+                conn_config,
+            )
+            .await
+            .unwrap()
+    });
+
+    let mut acceptor_stream = acceptor_one_handle.await.unwrap();
+    tracing::debug!("Acceptor stream established");
+    // Must not wait for connection to complete before writing data here, so that we can trigger
+    // the bug.
+
+    // data to send, must be longer than 2048 bytes, which are lost in the bug scenario
+    const DATA_LEN: usize = 9000;
+    let data = [0xa5; DATA_LEN];
+
+    // send data
+    let acceptor_stream_handle = tokio::spawn(async move {
+        match acceptor_stream.write(&data).await {
+            Ok(written_len) => assert_eq!(written_len, DATA_LEN),
+            Err(err) => panic!("Error sending data: {err:?}"),
+        };
+        acceptor_stream
+    });
+
+    // Finally, we can wait for the connection to complete. If we await this any earlier in the
+    // test, then the data won't be sent, and we don't trigger the bug scenario.
+    let mut connector_stream = connector_one_handle.await.unwrap();
+
+    // Test that complete data is received
+    let connector_stream_handle = tokio::spawn(async move {
+        let mut read_buf = vec![];
+        let _ = connector_stream.read_to_eof(&mut read_buf).await.unwrap();
+        assert_eq!(read_buf.len(), data.len());
+        assert_eq!(read_buf, data.to_vec());
+        connector_stream
+    });
+
+    // Complete the streams
+    let mut acceptor_stream = acceptor_stream_handle.await.unwrap();
+    acceptor_stream.close().await.unwrap();
+    connector_stream_handle.await.unwrap();
+}
