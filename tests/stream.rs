@@ -19,12 +19,13 @@ const EXPECTED_IDLE_TIMEOUT: Duration = DEFAULT_MAX_IDLE_TIMEOUT;
 async fn close_is_successful_when_write_completes() {
     let conn_config = ConnectionConfig::default();
 
-    let ((send_link, send_cid), (recv_link, recv_cid)) = testutils::build_connected_pair();
+    let ((send_socket, send_cid), (recv_socket, recv_cid)) =
+        testutils::build_manually_linked_pair();
 
-    let recv = UtpSocket::with_socket(recv_link);
+    let recv = UtpSocket::with_socket(recv_socket);
     let recv = Arc::new(recv);
 
-    let send = UtpSocket::with_socket(send_link);
+    let send = UtpSocket::with_socket(send_socket);
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
@@ -89,13 +90,14 @@ async fn close_is_successful_when_write_completes() {
 async fn close_errors_if_all_packets_dropped() {
     let conn_config = ConnectionConfig::default();
 
-    let ((mut send_link, send_cid), (recv_link, recv_cid)) = testutils::build_connected_pair();
-    let tx_link_up = send_link.up_status();
+    let ((send_socket, send_cid), (recv_socket, recv_cid)) =
+        testutils::build_manually_linked_pair();
+    let tx_link_switch = send_socket.link.up_switch.clone();
 
-    let recv = UtpSocket::with_socket(recv_link);
+    let recv = UtpSocket::with_socket(recv_socket);
     let recv = Arc::new(recv);
 
-    let send = UtpSocket::with_socket(send_link);
+    let send = UtpSocket::with_socket(send_socket);
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
@@ -121,7 +123,7 @@ async fn close_errors_if_all_packets_dropped() {
     let mut recv_stream = rx_one.unwrap();
 
     // ******* DISABLE NETWORK LINK ********
-    tx_link_up.store(false, Ordering::SeqCst);
+    tx_link_switch.store(false, Ordering::SeqCst);
 
     // data to send
     const DATA_LEN: usize = 100;
@@ -167,13 +169,14 @@ async fn close_errors_if_all_packets_dropped() {
 async fn close_succeeds_if_only_fin_ack_dropped() {
     let conn_config = ConnectionConfig::default();
 
-    let ((send_link, send_cid), (mut recv_link, recv_cid)) = testutils::build_connected_pair();
-    let rx_link_up = recv_link.up_status();
+    let ((send_socket, send_cid), (recv_socket, recv_cid)) =
+        testutils::build_manually_linked_pair();
+    let rx_link_switch = recv_socket.link.up_switch.clone();
 
-    let recv = UtpSocket::with_socket(recv_link);
+    let recv = UtpSocket::with_socket(recv_socket);
     let recv = Arc::new(recv);
 
-    let send = UtpSocket::with_socket(send_link);
+    let send = UtpSocket::with_socket(send_socket);
     let send = Arc::new(send);
 
     let recv_one = Arc::clone(&recv);
@@ -234,7 +237,7 @@ async fn close_succeeds_if_only_fin_ack_dropped() {
     //  - Sender receives nothing, because link is down
     //  - Recipient is only missing its inbound FIN-ACK and closes with success
     //  - Sender is missing the recipient's FIN and times out with failure
-    rx_link_up.store(false, Ordering::SeqCst);
+    rx_link_switch.store(false, Ordering::SeqCst);
 
     match timeout(EXPECTED_IDLE_TIMEOUT * 2, send_stream.close()).await {
         Ok(Ok(_)) => panic!("Send stream closed successfully, but should have timed out"),
