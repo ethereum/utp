@@ -1,6 +1,6 @@
 [package]
 name = "utp-rs"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.17"
 edition = "2021"
 authors = ["Jacob Kaufmann", "Jason Carver"]
 description = "uTorrent transport protocol"
