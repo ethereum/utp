@@ -6,6 +6,9 @@ This library is currently unstable, with known issues. Use at your own discretio
 
 # Usage
 
+A stream can transfer 1 MB. For larger transfers, data must be chunked to 1 MB chunks and each
+chunk sent on its own stream.
+
 ```rust
 use std::net::SocketAddr;
 
