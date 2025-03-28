@@ -17,3 +17,29 @@ pub fn duration_between(earlier_micros: u32, later_micros: u32) -> Duration {
         Duration::from_micros((later_micros - earlier_micros).into())
     }
 }
+
+#[test]
+fn test_now_duration() {
+    let micros_a = now_micros();
+    let micros_b = now_micros();
+
+    assert!(micros_a < micros_b);
+
+    let duration = duration_between(micros_a, micros_b);
+
+    let duration_micros = duration.as_micros();
+    assert!(duration_micros > 0);
+    assert!(duration_micros < 2000);
+}
+
+#[test]
+fn test_wrapped_duration() {
+    // Max u32 value minus 10.
+    let earlier_micros: u32 = 4294967285;
+    // Wrapped around by 10.
+    let later_micros: u32 = 10;
+    // earlier_micros > later_micros
+    let duration = duration_between(earlier_micros, later_micros);
+    // With 10 microseconds on each side of the max, total should be 20 microseconds.
+    assert_eq!(duration.as_micros(), 20);
+}
