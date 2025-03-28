@@ -329,4 +329,81 @@ mod test {
         acked[3] = true;
         assert_eq!(selective_ack.acked(), acked);
     }
+
+    /// Test to verify that stale packets (seq <= ack_num) are rejected on arrival
+    #[test]
+    fn stale_packet_rejection() {
+        let init_seq_num = 1000;
+        let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
+        let data = vec![0xab; 10];
+
+        // Advance the ack_num by writing a few packets
+        for i in 1..=5 {
+            buf.write(&data, init_seq_num.wrapping_add(i));
+        }
+
+        // Now ack_num() should be init_seq_num + 5 (1005)
+        assert_eq!(buf.ack_num(), init_seq_num.wrapping_add(5));
+
+        // Try to write a packet with seq_num <= ack_num (stale packet)
+        let stale_seq = init_seq_num.wrapping_add(3); // 1003, which is < 1005
+        buf.write(&data, stale_seq);
+
+        // The stale packet should be rejected, so nothing should be added to pending
+        assert!(!buf.pending.contains_key(&stale_seq));
+
+        // Try with a sequence number equal to ack_num
+        let stale_seq = init_seq_num.wrapping_add(5); // 1005, equal to ack_num
+        buf.write(&data, stale_seq);
+
+        // This should also be rejected
+        assert!(!buf.pending.contains_key(&stale_seq));
+
+        // Verify that non-stale packets are still accepted
+        let valid_seq = init_seq_num.wrapping_add(10); // 1010, which is > 1005
+        buf.write(&data, valid_seq);
+
+        // This should be accepted and added to pending
+        assert!(buf.pending.contains_key(&valid_seq));
+    }
+
+    /// Test to verify stale packet rejection and cleanup at the wraparound boundary
+    #[test]
+    fn stale_packet_wraparound() {
+        let init_seq_num = u16::MAX - 5; // 65530
+        let mut buf = ReceiveBuffer::<SIZE>::new(init_seq_num);
+        let data = vec![0xef; 20];
+
+        // Add several out-of-order packets, including some that wrap around
+        buf.write(&data, init_seq_num.wrapping_add(10)); // 65540-> 4
+        buf.write(&data, init_seq_num.wrapping_add(15)); // 65545 -> 9
+        buf.write(&data, init_seq_num.wrapping_add(20)); // 65550 -> 14
+
+        // Verify they're in pending
+        assert!(buf.pending.contains_key(&init_seq_num.wrapping_add(10)));
+        assert!(buf.pending.contains_key(&init_seq_num.wrapping_add(15)));
+        assert!(buf.pending.contains_key(&init_seq_num.wrapping_add(20)));
+
+        // Now write packets that wrap around and advance ack_num
+        for i in 1..=12 {
+            buf.write(&data, init_seq_num.wrapping_add(i));
+        }
+
+        // ack_num should now be 6 (after wrapping)
+        assert_eq!(buf.ack_num(), init_seq_num.wrapping_add(12)); // 65542 -> 6
+
+        // Pending packets with seq <= 5 should be cleaned up
+        assert!(!buf.pending.contains_key(&init_seq_num.wrapping_add(10))); // 4 is < 5
+
+        // Higher sequence packets should still be in pending
+        assert!(buf.pending.contains_key(&init_seq_num.wrapping_add(15))); // 9 is > 5
+        assert!(buf.pending.contains_key(&init_seq_num.wrapping_add(20))); // 14 is > 5
+
+        // Try to write a stale packet after wraparound
+        let stale_seq = init_seq_num.wrapping_add(2); // 65532, which is < 5 after wrapping
+        buf.write(&data, stale_seq);
+
+        // It should be rejected
+        assert!(!buf.pending.contains_key(&stale_seq));
+    }
 }
