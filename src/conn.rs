@@ -753,16 +753,11 @@ impl<const N: usize, P: ConnectionPeer> Connection<N, P> {
         let now_micros = crate::time::now_micros();
         self.peer_recv_window = packet.window_size();
 
-        // Cap the diff. If the clock on the remote machine is ahead of the clock on the local
-        // machine, then we could end up with large (inaccurate) diffs. Use the max idle timeout as
-        // an upper bound on the possible diff. If the diff exceeds the bound, then assume the
-        // remote clock is behind the local clock and use a diff of 1s.
-        let peer_ts_diff = crate::time::duration_between(packet.ts_micros(), now_micros);
-        if peer_ts_diff > self.config.max_idle_timeout {
-            self.peer_ts_diff = Duration::from_secs(1);
+        self.peer_ts_diff = if packet.ts_micros() == 0 {
+            Duration::from_micros(0)
         } else {
-            self.peer_ts_diff = peer_ts_diff;
-        }
+            Duration::from_micros(now_micros.wrapping_sub(packet.ts_micros()).into())
+        };
 
         match packet.packet_type() {
             PacketType::Syn => self.on_syn(packet.seq_num()),
